@@ -17,6 +17,7 @@ import ContributionPage from './pages/ContributionPage'
 import ExternalSystemPage from './pages/ExternalSystemPage'
 import OperationLogPage from './pages/OperationLogPage'
 import MessageCenterPage from './pages/MessageCenterPage'
+import NotificationConfigPage from './pages/NotificationConfigPage'
 import TicketManage from './pages/TicketManage'
 import IncomeCheckPage from './pages/IncomeCheckPage'
 import PriceStandardPage from './pages/PriceStandardPage'
@@ -120,6 +121,7 @@ export default function App() {
                   label: '集成与审计',
                   children: [
                     { key: 'external-systems', label: '外部系统/API Key' },
+                    { key: 'notification-config', label: '工单通知配置' },
                     { key: 'operation-logs', label: '操作日志' },
                     { key: 'messages', label: '站内消息' },
                   ],
@@ -165,6 +167,7 @@ export default function App() {
             {page === 'income-check' && <IncomeCheckPage config={config} orgId={orgId} />}
             {page === 'price-standards' && <PriceStandardPage config={config} />}
             {page === 'external-systems' && <ExternalSystemPage config={config} orgId={orgId} onRefresh={refresh} />}
+            {page === 'notification-config' && <NotificationConfigPage config={config} orgId={orgId} onRefresh={refresh} />}
             {page === 'operation-logs' && <OperationLogPage config={config} orgId={orgId} />}
             {page === 'messages' && <MessageCenterPage config={config} orgId={orgId} onRefresh={refresh} />}
             {page === 'types' ? (

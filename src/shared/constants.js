@@ -46,6 +46,7 @@ export const FIELD_STRATEGY = {
 
 export const NOTIFY_TARGETS = [
   { label: '执行人', value: 'executor' },
+  { label: '创建人/发起人', value: 'creator' },
   { label: '指定角色', value: 'role' },
   { label: '指定人员', value: 'person' },
 ]
@@ -54,6 +55,29 @@ export const NOTIFY_CHANNELS = [
   { label: '站内消息', value: 'site' },
   { label: 'App推送', value: 'app' },
   { label: '短信', value: 'sms' },
+]
+
+export const NOTIFY_EVENTS = [
+  { label: '创建', value: 'created', color: 'blue' },
+  { label: '变更', value: 'updated', color: 'cyan' },
+  { label: '完成', value: 'completed', color: 'green' },
+  { label: '超期', value: 'overdue', color: 'red' },
+  { label: '临期', value: 'nearDeadline', color: 'orange' },
+  { label: '已关闭', value: 'closed', color: 'default' },
+  { label: '已取消', value: 'cancelled', color: 'default' },
+]
+
+export const NOTIFY_REMINDER_OPERATORS = [
+  { label: '大于等于', value: 'gte' },
+  { label: '小于等于', value: 'lte' },
+]
+
+export const NOTIFY_ROLES = [
+  { label: '集团管理员', value: 'group_admin' },
+  { label: '子公司配置管理员', value: 'subsidiary_config_admin' },
+  { label: '子公司工单管理员', value: 'subsidiary_manager' },
+  { label: '子公司负责人', value: 'subsidiary_owner' },
+  { label: '班组长/主管', value: 'supervisor' },
 ]
 
 export const TRIGGER_FREQ = [

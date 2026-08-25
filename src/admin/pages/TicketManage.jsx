@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { Card, Table, Tag, Space, Button, Modal, Input, Select, message } from 'antd'
-import { saveConfig } from '@shared/store'
+import { saveConfig, pushNotificationForEvent } from '@shared/store'
 import { TICKET_STATUS } from '@shared/constants'
 
 export default function TicketManage({ config, orgId, onRefresh }) {
@@ -46,6 +46,13 @@ export default function TicketManage({ config, orgId, onRefresh }) {
     })
     record.values = values
     record.status = 'completed'
+    pushNotificationForEvent(config, {
+      orgId: record.orgId,
+      ticketTypeId: record.ticketTypeId,
+      ticketNo: record.ticketNo,
+      typeName: type?.name || '',
+      event: 'completed',
+    })
     saveConfig(config)
     message.success('外部数据已模拟回传，工单完成')
     onRefresh()
@@ -57,6 +64,14 @@ export default function TicketManage({ config, orgId, onRefresh }) {
     if (ticket) {
       ticket.forceReason = forceText.trim()
       ticket.status = 'closed'
+      const type = config.ticketTypes.find((t) => t.id === ticket.ticketTypeId)
+      pushNotificationForEvent(config, {
+        orgId: ticket.orgId,
+        ticketTypeId: ticket.ticketTypeId,
+        ticketNo: ticket.ticketNo,
+        typeName: type?.name || '',
+        event: 'closed',
+      })
       saveConfig(config)
       message.success('已强制完结')
     }
@@ -72,6 +87,14 @@ export default function TicketManage({ config, orgId, onRefresh }) {
       ticket.status = 'completed'
       ticket.overtimeCompleted = true
       ticket.overtimeReason = timeoutText.trim()
+      const type = config.ticketTypes.find((t) => t.id === ticket.ticketTypeId)
+      pushNotificationForEvent(config, {
+        orgId: ticket.orgId,
+        ticketTypeId: ticket.ticketTypeId,
+        ticketNo: ticket.ticketNo,
+        typeName: type?.name || '',
+        event: 'completed',
+      })
       saveConfig(config)
       message.success('已超时完成')
     }

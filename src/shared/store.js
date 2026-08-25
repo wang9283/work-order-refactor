@@ -1,5 +1,6 @@
 // 共享数据存取层：PC 与 App 共用同一 localStorage key，保证两端数据一致
 import { createDefaultConfig } from './demoData'
+import { NOTIFY_EVENTS } from './constants'
 
 const CONFIG_KEY = 'workOrderRefactor.config.v1'
 const ORG_KEY = 'workOrderRefactor.currentOrg.v1'
@@ -20,6 +21,45 @@ export function loadConfig() {
         if (!Array.isArray(data.messages)) data.messages = []
         if (!Array.isArray(data.priceStandards)) data.priceStandards = []
         if (!Array.isArray(data.pieceStandards)) data.pieceStandards = []
+        if (!Array.isArray(data.notificationRules)) {
+          data.notificationRules = []
+          ;(data.ticketTypes || []).forEach((t) => {
+            if (t.notify?.enabled) {
+              data.notificationRules.push({
+                id: 'nr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+                name: `${t.name}-创建通知`,
+                scope: t.typeOrigin === 'group_standard' ? 'group' : (t.ownerOrgId || 'group'),
+                ticketTypeId: t.id,
+                event: 'created',
+                enabled: true,
+                targets: Array.isArray(t.notify.targets) && t.notify.targets.length ? t.notify.targets : ['executor'],
+                roles: [],
+                personIds: [],
+                channels: Array.isArray(t.notify.channels) && t.notify.channels.length ? t.notify.channels : ['site'],
+                template: '您有一条新的「{typeName}」工单 {ticketNo} 待处理',
+                createdAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+                updatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+              })
+            }
+          })
+        }
+        // 兼容旧版本：删除“待数据”提醒；将“已超时”归一为“超期”，并补齐提醒天数
+        data.notificationRules = (data.notificationRules || []).filter((r) => r.event !== 'waitingData')
+        data.notificationRules.forEach((r) => {
+          if (r.event === 'timeout') {
+            r.event = 'overdue'
+            r.reminderOperator = r.reminderOperator || 'gte'
+            r.reminderDays = r.reminderDays || 3
+          }
+          if (r.event === 'overdue') {
+            r.reminderOperator = r.reminderOperator || 'gte'
+            r.reminderDays = r.reminderDays || 3
+          }
+          if (r.event === 'nearDeadline') {
+            r.reminderOperator = r.reminderOperator || 'lte'
+            r.reminderDays = r.reminderDays || 2
+          }
+        })
         saveConfig(data)
         return data
       }
@@ -118,6 +158,41 @@ export function getResolvedTicketType(config, ticketTypeId, orgId) {
   return resolveTicketType(ticketType, orgId)
 }
 
+export function getVisibleNotificationRules(config, orgId) {
+  const rules = config.notificationRules || []
+  if (orgId === 'group') return rules
+  return rules.filter((r) => r.scope === 'group' || r.scope === orgId)
+}
+
+export function pushNotificationForEvent(config, { orgId, ticketTypeId, ticketNo, typeName, event }) {
+  if (event === 'waitingData') return
+  if (!config.messages) config.messages = []
+  const now = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  const eventLabel = NOTIFY_EVENTS.find((e) => e.value === event)?.label || event
+  const rules = (config.notificationRules || []).filter((r) => (
+    r.enabled &&
+    r.ticketTypeId === ticketTypeId &&
+    r.event === event &&
+    (r.scope === 'group' || r.scope === orgId)
+  ))
+  rules.forEach((rule) => {
+    const template = rule.template || '您有一条工单通知'
+    const content = template
+      .replace(/\{ticketNo\}/g, ticketNo || '')
+      .replace(/\{typeName\}/g, typeName || '')
+      .replace(/\{event\}/g, eventLabel)
+    config.messages.push({
+      id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      title: `【${typeName || '工单'}】${eventLabel}通知`,
+      content,
+      type: '工单通知',
+      read: false,
+      orgId,
+      createdAt: now,
+    })
+  })
+}
+
 export function nextCode(config, prefix = 'T') {
   const codes = new Set(config.ticketTypes.map((t) => t.code))
   let n = 1
@@ -157,14 +232,12 @@ export function addTicket(config, ticketTypeId, orgId) {
   }
   config.tickets.push(ticket)
   type.generatedCount = (type.generatedCount || 0) + 1
-  config.messages.push({
-    id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-    title: '工单生成通知',
-    content: `您有一条新的「${type.name}」工单 ${ticket.ticketNo} 待处理`,
-    type: '工单通知',
-    read: false,
+  pushNotificationForEvent(config, {
     orgId,
-    createdAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+    ticketTypeId,
+    ticketNo: ticket.ticketNo,
+    typeName: type.name,
+    event: 'created',
   })
   saveConfig(config)
   return ticket

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { NavBar, Button, Input, TextArea, Selector, Toast, Tag, List, Space, Dialog, Popup } from 'antd-mobile'
-import { loadConfig, loadCurrentOrg, saveConfig, getResolvedTicketType, getFormById, getFormVersion } from '@shared/store'
+import { loadConfig, loadCurrentOrg, saveConfig, getResolvedTicketType, getFormById, getFormVersion, pushNotificationForEvent } from '@shared/store'
 import { TICKET_STATUS, FIELD_STRATEGY } from '@shared/constants'
 
 export default function TaskDetail({ ticketId, onBack }) {
@@ -123,6 +123,15 @@ export default function TaskDetail({ ticketId, onBack }) {
     ticket.values = values
     ticket.subRecords = subRecords
     ticket.submittedAt = new Date().toISOString().slice(0, 16).replace('T', ' ')
+    if (nextStatus === 'completed' || nextStatus === 'waitingData') {
+      pushNotificationForEvent(config, {
+        orgId,
+        ticketTypeId: ticket.ticketTypeId,
+        ticketNo: ticket.ticketNo,
+        typeName: type.name,
+        event: nextStatus,
+      })
+    }
     saveConfig(config)
     setConfig(loadConfig())
     Toast.show({ content: nextStatus === 'completed' ? '已完成' : '已提交完工，等待数据' })
