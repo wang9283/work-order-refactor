@@ -1,9 +1,11 @@
 // 共享数据存取层：PC 与 App 共用同一 localStorage key，保证两端数据一致
 import { createDefaultConfig } from './demoData'
 import { NOTIFY_EVENTS } from './constants'
+import { defaultRole, normalizeRole } from './roles'
 
 const CONFIG_KEY = 'workOrderRefactor.config.v1'
 const ORG_KEY = 'workOrderRefactor.currentOrg.v1'
+const ROLE_KEY = 'workOrderRefactor.currentRole.v1'
 
 export function loadConfig() {
   const raw = localStorage.getItem(CONFIG_KEY)
@@ -88,6 +90,19 @@ export function loadCurrentOrg() {
 
 export function saveCurrentOrg(orgId) {
   localStorage.setItem(ORG_KEY, orgId)
+}
+
+export function loadCurrentRole(orgId) {
+  const saved = localStorage.getItem(ROLE_KEY)
+  return normalizeRole(orgId, saved)
+}
+
+export function saveCurrentRole(role) {
+  localStorage.setItem(ROLE_KEY, role)
+}
+
+export function getDefaultRole(orgId) {
+  return defaultRole(orgId)
 }
 
 export function getOrgOptions(config) {

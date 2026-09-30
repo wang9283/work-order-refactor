@@ -1,8 +1,12 @@
 import React, { useMemo, useState } from 'react'
 import { Card, Table, Button, Modal, InputNumber, Select, Space, Tag, message, Popconfirm } from 'antd'
 import { saveConfig } from '@shared/store'
+import { loadCurrentRole } from '@shared/store'
+import { can } from '@shared/roles'
 
 export default function ContributionPage({ config, orgId, onRefresh }) {
+  const role = loadCurrentRole(orgId)
+  const canEdit = can(role, 'editContribution')
   const [editingTicketId, setEditingTicketId] = useState(null)
   const [participants, setParticipants] = useState([])
   const [newPersonId, setNewPersonId] = useState(undefined)
@@ -68,7 +72,7 @@ export default function ContributionPage({ config, orgId, onRefresh }) {
           { title: '当前执行人', dataIndex: 'assigneeId', width: 120, render: (v) => personnel.find((p) => p.id === v)?.name || '—' },
           {
             title: '操作', key: 'action', width: 120,
-            render: (_, record) => <Button size="small" type="primary" ghost onClick={() => openAdjust(record)}>调节</Button>,
+            render: (_, record) => (canEdit ? <Button size="small" type="primary" ghost onClick={() => openAdjust(record)}>调节</Button> : <span style={{ color: '#999' }}>—</span>),
           },
         ]}
       />

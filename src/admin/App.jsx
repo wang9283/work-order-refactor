@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { Layout, Menu, Select, Space, Tag, Avatar } from 'antd'
 import { FileTextOutlined, ProfileOutlined, HomeOutlined, ApartmentOutlined } from '@ant-design/icons'
-import { loadConfig, loadCurrentOrg, saveCurrentOrg } from '@shared/store'
+import { loadConfig, loadCurrentOrg, saveCurrentOrg, loadCurrentRole, saveCurrentRole } from '@shared/store'
+import { ROLE_LABELS, availableRoles, canAccess, filterMenu } from '@shared/roles'
 import TicketTypeList from './pages/TicketTypeList'
 import FormTemplateList from './pages/FormTemplateList'
 import TaskCategoryList from './pages/TaskCategoryList'
@@ -24,9 +25,84 @@ import PriceStandardPage from './pages/PriceStandardPage'
 
 const { Header, Sider, Content } = Layout
 
+// 菜单结构；可见性由 filterMenu 按角色过滤（见 src/shared/roles.js）
+const MENU_ITEMS = [
+  { key: 'home', icon: <HomeOutlined />, label: '首页' },
+  {
+    key: 'types-group',
+    icon: <ProfileOutlined />,
+    label: '工单类型配置',
+    children: [
+      { key: 'types', label: '工单类型列表' },
+      { key: 'categories', label: '任务大类' },
+      { key: 'forms', label: '工单模板构建' },
+    ],
+  },
+  {
+    key: 'execution-group',
+    icon: <FileTextOutlined />,
+    label: '排班与执行',
+    children: [
+      { key: 'tickets', label: '工单管理' },
+      { key: 'schedules', label: '月排班' },
+    ],
+  },
+  {
+    key: 'salary-group',
+    icon: <FileTextOutlined />,
+    label: '薪酬与报表',
+    children: [
+      { key: 'reports', label: '报表中心' },
+      { key: 'salary-sub', label: '薪酬核算（低频）', children: [
+        { key: 'contribution', label: '贡献调节' },
+        { key: 'income-check', label: '收入核对' },
+        { key: 'price-standards', label: '单价/计件标准' },
+      ] },
+    ],
+  },
+  {
+    key: 'integration-group',
+    icon: <ApartmentOutlined />,
+    label: '集成与审计',
+    children: [
+      { key: 'notification-config', label: '工单通知配置' },
+      { key: 'operation-logs', label: '操作日志' },
+      { key: 'messages', label: '站内消息' },
+      { key: 'integration-sub', label: '外部集成（低频）', children: [
+        { key: 'external-systems', label: '外部系统/API Key' },
+      ] },
+    ],
+  },
+  {
+    key: 'reserved-group',
+    icon: <ApartmentOutlined />,
+    label: '预留功能',
+    children: [
+      { key: 'reserved-device', label: '设备档案', disabled: true },
+      { key: 'reserved-role', label: '角色管理', disabled: true },
+      { key: 'reserved-account', label: '账号管理', disabled: true },
+      { key: 'reserved-data-rule', label: '数据权限规则', disabled: true },
+      { key: 'reserved-condition', label: '条件逻辑', disabled: true },
+    ],
+  },
+  {
+    key: 'basic-data-group',
+    icon: <ApartmentOutlined />,
+    label: '基础主数据',
+    children: [
+      { key: 'orgs', label: '行政组织' },
+      { key: 'personnel', label: '人员档案' },
+      { key: 'shifts', label: '班次管理' },
+      { key: 'dicts', label: '数据字典' },
+      { key: 'lines-materials', label: '生产线/物料' },
+    ],
+  },
+]
+
 export default function App() {
   const [config, setConfig] = useState(() => loadConfig())
   const [orgId, setOrgId] = useState(() => loadCurrentOrg())
+  const [role, setRole] = useState(() => loadCurrentRole(loadCurrentOrg()))
   const [page, setPage] = useState('home')
 
   useEffect(() => {
@@ -38,6 +114,18 @@ export default function App() {
   const handleOrgChange = (value) => {
     saveCurrentOrg(value)
     setOrgId(value)
+    // 组织变了，角色按新组织可选范围重新校验
+    const nextRole = loadCurrentRole(value)
+    saveCurrentRole(nextRole)
+    setRole(nextRole)
+    setPage('home')
+  }
+
+  const handleRoleChange = (value) => {
+    saveCurrentRole(value)
+    setRole(value)
+    // 切到无权访问的页面时回首页
+    if (!canAccess(page, value)) setPage('home')
   }
 
   const handleMenuClick = (e) => {
@@ -46,7 +134,7 @@ export default function App() {
   }
 
   const currentOrg = config.orgs.find((o) => o.id === orgId)
-  const roleName = orgId === 'group' ? '集团管理员' : '子公司配置管理员'
+  const roleName = ROLE_LABELS[role] || role
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -54,9 +142,18 @@ export default function App() {
         <Space size={12}>
           <img src="/logo.png" alt="东方希望" style={{ height: 28 }} />
           <span style={{ fontSize: 16, fontWeight: 600 }}>用工管理平台</span>
-          <Tag color="blue">v2.0</Tag>
+          <Tag color="blue">v2.1</Tag>
         </Space>
         <Space size={16}>
+          <Space size={8}>
+            <span style={{ color: 'rgba(0,0,0,0.45)', fontSize: 13 }}>角色视角</span>
+            <Select
+              value={role}
+              style={{ width: 170 }}
+              onChange={handleRoleChange}
+              options={availableRoles(orgId).map((r) => ({ label: ROLE_LABELS[r], value: r }))}
+            />
+          </Space>
           <Tag color="geekblue">{roleName}</Tag>
           <Select
             value={orgId}
@@ -75,112 +172,35 @@ export default function App() {
           <Menu
             mode="inline"
             selectedKeys={[page]}
-              defaultOpenKeys={['types-group', 'execution-group']}
+            defaultOpenKeys={['types-group', 'execution-group']}
             onClick={handleMenuClick}
-            items={[
-              { key: 'home', icon: <HomeOutlined />, label: '首页' },
-                {
-                  key: 'types-group',
-                  icon: <ProfileOutlined />,
-                  label: '工单类型配置',
-                  children: [
-                    { key: 'types', label: '工单类型列表' },
-                    { key: 'categories', label: '任务大类' },
-                      { key: 'forms', label: '工单模板构建' },
-                  ],
-                },
-              
-                {
-                  key: 'execution-group',
-                  icon: <FileTextOutlined />,
-                  label: '排班与执行',
-                  children: [
-                    { key: 'tickets', label: '工单管理' },
-                    { key: 'schedules', label: '月排班' },
-                  ],
-                },
-                {
-                  key: 'salary-group',
-                  icon: <FileTextOutlined />,
-                  label: '薪酬与报表',
-                  children: [
-                    { key: 'reports', label: '报表中心' },
-                    { key: 'salary-sub', label: '薪酬核算（低频）', children: [
-                      { key: 'contribution', label: '贡献调节' },
-                      { key: 'income-check', label: '收入核对' },
-                      { key: 'price-standards', label: '单价/计件标准' },
-                    ] },
-                  ],
-                },
-                
-                
-                
-                
-                
-                {
-                  key: 'integration-group',
-                  icon: <ApartmentOutlined />,
-                  label: '集成与审计',
-                  children: [
-                    { key: 'notification-config', label: '工单通知配置' },
-                    { key: 'operation-logs', label: '操作日志' },
-                    { key: 'messages', label: '站内消息' },
-                    { key: 'integration-sub', label: '外部集成（低频）', children: [
-                      { key: 'external-systems', label: '外部系统/API Key' },
-                    ] },
-                  ],
-                },
-                {
-                  key: 'reserved-group',
-                  icon: <ApartmentOutlined />,
-                  label: '预留功能',
-                  children: [
-                    { key: 'reserved-device', label: '设备档案', disabled: true },
-                    { key: 'reserved-role', label: '角色管理', disabled: true },
-                    { key: 'reserved-account', label: '账号管理', disabled: true },
-                    { key: 'reserved-data-rule', label: '数据权限规则', disabled: true },
-                    { key: 'reserved-condition', label: '条件逻辑', disabled: true },
-                  ],
-                },
-                {
-                  key: 'basic-data-group',
-                  icon: <ApartmentOutlined />,
-                  label: '基础主数据',
-                  children: [
-                    { key: 'orgs', label: '行政组织' },
-                    { key: 'personnel', label: '人员档案' },
-                      { key: 'shifts', label: '班次管理' },
-                      { key: 'dicts', label: '数据字典' },
-                      { key: 'lines-materials', label: '生产线/物料' },
-                  ],
-                },
-            ]}
+            items={filterMenu(MENU_ITEMS, role)}
           />
         </Sider>
         <Content style={{ padding: 16, background: '#f5f5f5' }}>
           {page === 'home' && <HomePage config={config} orgId={orgId} />}
-            {page === 'orgs' && <OrgManage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'personnel' && <PersonnelPage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'shifts' && <ShiftManage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'dicts' && <DataDictManage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'lines-materials' && <ProductionLineMaterial config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'schedules' && <SchedulePage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'tickets' && <TicketManage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'reports' && <ReportPage config={config} orgId={orgId} />}
-            {page === 'contribution' && <ContributionPage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'income-check' && <IncomeCheckPage config={config} orgId={orgId} />}
-            {page === 'price-standards' && <PriceStandardPage config={config} />}
-            {page === 'external-systems' && <ExternalSystemPage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'notification-config' && <NotificationConfigPage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'operation-logs' && <OperationLogPage config={config} orgId={orgId} />}
-            {page === 'messages' && <MessageCenterPage config={config} orgId={orgId} onRefresh={refresh} />}
-            {page === 'types' ? (
+          {page === 'orgs' && <OrgManage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'personnel' && <PersonnelPage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'shifts' && <ShiftManage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'dicts' && <DataDictManage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'lines-materials' && <ProductionLineMaterial config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'schedules' && <SchedulePage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'tickets' && <TicketManage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'reports' && <ReportPage config={config} orgId={orgId} />}
+          {page === 'contribution' && <ContributionPage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'income-check' && <IncomeCheckPage config={config} orgId={orgId} />}
+          {page === 'price-standards' && <PriceStandardPage config={config} />}
+          {page === 'external-systems' && <ExternalSystemPage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'notification-config' && <NotificationConfigPage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'operation-logs' && <OperationLogPage config={config} orgId={orgId} />}
+          {page === 'messages' && <MessageCenterPage config={config} orgId={orgId} onRefresh={refresh} />}
+          {page === 'types' ? (
             <TicketTypeList config={config} orgId={orgId} onRefresh={refresh} />
           ) : page === 'categories' ? (
-              <TaskCategoryList config={config} orgId={orgId} onRefresh={refresh} />
-            ) : (
-            (page === 'forms' ? <FormTemplateList config={config} orgId={orgId} onRefresh={refresh} /> : null)
-          )}
+            <TaskCategoryList config={config} orgId={orgId} onRefresh={refresh} />
+          ) : page === 'forms' ? (
+            <FormTemplateList config={config} orgId={orgId} onRefresh={refresh} />
+          ) : null}
         </Content>
       </Layout>
     </Layout>

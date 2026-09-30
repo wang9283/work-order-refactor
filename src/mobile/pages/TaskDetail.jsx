@@ -1,11 +1,14 @@
 import React, { useMemo, useState } from 'react'
 import { NavBar, Button, Input, TextArea, Selector, Toast, Tag, List, Space, Popup, Collapse } from 'antd-mobile'
-import { loadConfig, loadCurrentOrg, saveConfig, getResolvedTicketType, getFormById, getFormVersion, pushNotificationForEvent } from '@shared/store'
+import { loadConfig, loadCurrentOrg, saveConfig, getResolvedTicketType, getFormById, getFormVersion, pushNotificationForEvent, loadCurrentRole } from '@shared/store'
 import { TICKET_STATUS, FIELD_STRATEGY } from '@shared/constants'
+import { can } from '@shared/roles'
 
 export default function TaskDetail({ ticketId, onBack }) {
   const [config, setConfig] = useState(() => loadConfig())
   const orgId = loadCurrentOrg()
+  const role = loadCurrentRole(orgId)
+  const canSubmit = can(role, 'submitTask')
   const ticket = config.tickets.find((t) => t.id === ticketId)
   const type = ticket ? getResolvedTicketType(config, ticket.ticketTypeId, orgId) : null
   const form = type ? getFormById(config, type.formId) : null
@@ -176,19 +179,25 @@ export default function TaskDetail({ ticketId, onBack }) {
                 ))}
               </div>
             ))}
-            <List.Item>
+            {canSubmit && <List.Item>
               <Button size="small" fill="outline" onClick={() => addSubRecord(sub.id)}>+ 添加{sub.name}记录</Button>
-            </List.Item>
+            </List.Item>}
           </List>
         )
       })}
 
-      <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
-        <Button block color="primary" onClick={submit}>提交完工</Button>
-        {ticket.status === 'timeout' && (
-          <Button block fill="outline" onClick={() => setForceOpen(true)}>超时完成</Button>
-        )}
-      </div>
+      {canSubmit ? (
+        <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+          <Button block color="primary" onClick={submit}>提交完工</Button>
+          {ticket.status === 'timeout' && (
+            <Button block fill="outline" onClick={() => setForceOpen(true)}>超时完成</Button>
+          )}
+        </div>
+      ) : (
+        <div style={{ marginTop: 16, padding: '10px 12px', background: '#fff7e6', borderRadius: 8, fontSize: 13, color: '#ad6800' }}>
+          当前为只读视角，仅「执行人」可提交完工。
+        </div>
+      )}
 
         <Popup
           visible={forceOpen}

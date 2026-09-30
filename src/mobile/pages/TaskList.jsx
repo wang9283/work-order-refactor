@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react'
 import { Button, List, Tag, Space, Input, Dialog, Tabs } from 'antd-mobile'
-import { loadConfig, loadCurrentOrg, getVisibleTicketTypes, getResolvedTicketType, addTicket } from '@shared/store'
+import { loadConfig, loadCurrentOrg, getVisibleTicketTypes, getResolvedTicketType, addTicket, loadCurrentRole } from '@shared/store'
 import { TICKET_STATUS } from '@shared/constants'
+import { can } from '@shared/roles'
 
 // 内部 8 态 → 用户分组：待办 / 进行中 / 已结束；待数据、已超时仅在真发生时动态露出
 const STATUS_GROUPS = {
@@ -17,6 +18,8 @@ export default function TaskList({ onOpenTicket, status, onStatusChange }) {
   const [config, setConfig] = useState(() => loadConfig())
   const [quickCode, setQuickCode] = useState('')
   const orgId = loadCurrentOrg()
+  const role = loadCurrentRole(orgId)
+  const canCreate = can(role, 'createTask')
 
   const visibleTypes = useMemo(() => getVisibleTicketTypes(config, orgId), [config, orgId])
   const orgTickets = useMemo(() => config.tickets.filter((t) => t.orgId === orgId), [config, orgId])
@@ -73,12 +76,12 @@ export default function TaskList({ onOpenTicket, status, onStatusChange }) {
 
   return (
     <div style={{ padding: 12 }}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+      {canCreate && <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <Input placeholder="输入工单类型编码，如 PROD" value={quickCode} onChange={setQuickCode} style={{ flex: 1 }} />
         <Button color="primary" onClick={quickCreate}>快速新建</Button>
-      </div>
+      </div>}
 
-      <List header="可执行工单类型">
+      {canCreate && <List header="可执行工单类型">
         {visibleTypes.length === 0 && <div style={{ padding: '16px 0', color: '#999', textAlign: 'center' }}>暂无可执行类型</div>}
         {visibleTypes.map((type) => (
           <List.Item
@@ -92,7 +95,7 @@ export default function TaskList({ onOpenTicket, status, onStatusChange }) {
             </Space>
           </List.Item>
         ))}
-      </List>
+      </List>}
 
       <Tabs activeKey={activeStatus} onChange={onStatusChange} style={{ marginTop: 12 }}>
         {tabs.map((s) => (

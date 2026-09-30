@@ -1,7 +1,8 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { NavBar, TabBar, Space, Button } from 'antd-mobile'
 import { AppOutline, UnorderedListOutline, UserOutline } from 'antd-mobile-icons'
-import { loadConfig, loadCurrentOrg } from '@shared/store'
+import { loadConfig, loadCurrentOrg, loadCurrentRole, saveCurrentRole } from '@shared/store'
+import { ROLE_LABELS } from '@shared/roles'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import DaySchedule from './pages/DaySchedule'
@@ -21,14 +22,35 @@ export default function App() {
   const [selectedTicketId, setSelectedTicketId] = useState(null)
   const [showMessages, setShowMessages] = useState(false)
   const [mineView, setMineView] = useState('menu')
+  const [role, setRole] = useState(() => loadCurrentRole(loadCurrentOrg()))
   const config = loadConfig()
   const orgId = loadCurrentOrg()
   const currentOrg = config.orgs.find((o) => o.id === orgId)
-  const roleName = orgId === 'group' ? '集团管理员' : '子公司配置管理员'
+
+  // PC 端切换组织/角色后，App 侧同步刷新视角
+  useEffect(() => {
+    setRole(loadCurrentRole(orgId))
+    setMineView('menu')
+  }, [orgId])
+
+  const handleRoleChange = (value) => {
+    saveCurrentRole(value)
+    setRole(value)
+    setMineView('menu')
+  }
+
+  const roleName = ROLE_LABELS[role] || role
 
   const renderMine = () => {
     if (mineView === 'menu') {
-      return <Mine orgName={currentOrg?.name} roleName={roleName} onOpen={setMineView} />
+      return (
+        <Mine
+          orgName={currentOrg?.name}
+          role={role}
+          onRoleChange={handleRoleChange}
+          onOpen={setMineView}
+        />
+      )
     }
     return (
       <div>

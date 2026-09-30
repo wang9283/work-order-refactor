@@ -1,9 +1,13 @@
 import React, { useMemo, useState } from 'react'
 import { Card, Table, Tag, Space, Button, Modal, Input, Select, message } from 'antd'
 import { saveConfig, pushNotificationForEvent } from '@shared/store'
+import { loadCurrentRole } from '@shared/store'
+import { can } from '@shared/roles'
 import { TICKET_STATUS } from '@shared/constants'
 
 export default function TicketManage({ config, orgId, onRefresh }) {
+  const role = loadCurrentRole(orgId)
+  const canManage = can(role, 'manageTickets')
   const [reviewTicketId, setReviewTicketId] = useState(null)
   const [reviewText, setReviewText] = useState('')
   const [forceTicketId, setForceTicketId] = useState(null)
@@ -133,11 +137,11 @@ export default function TicketManage({ config, orgId, onRefresh }) {
             title: '操作', key: 'action', width: 220, fixed: 'right',
             render: (_, record) => (
               <Space size="small">
-                {record.status === 'timeout' && <a onClick={() => { setTimeoutTicketId(record.id); setTimeoutText('') }}>超时完成</a>}
-                {record.status === 'timeout' && <a onClick={() => { setForceTicketId(record.id); setForceText('') }} style={{ color: '#ff4d4f' }}>强制完结</a>}
-                {record.status === 'timeout' && <a onClick={() => { setReviewTicketId(record.id); setReviewText('') }}>复核</a>}
-                {record.status === 'waitingData' && <a onClick={() => mockArrive(record)}>模拟数据到达</a>}
-                {!['timeout', 'waitingData', 'closed', 'completed'].includes(record.status) && <span style={{ color: '#999' }}>—</span>}
+                {canManage && record.status === 'timeout' && <a onClick={() => { setTimeoutTicketId(record.id); setTimeoutText('') }}>超时完成</a>}
+                {canManage && record.status === 'timeout' && <a onClick={() => { setForceTicketId(record.id); setForceText('') }} style={{ color: '#ff4d4f' }}>强制完结</a>}
+                {canManage && record.status === 'timeout' && <a onClick={() => { setReviewTicketId(record.id); setReviewText('') }}>复核</a>}
+                {canManage && record.status === 'waitingData' && <a onClick={() => mockArrive(record)}>模拟数据到达</a>}
+                {(!canManage || !['timeout', 'waitingData', 'closed', 'completed'].includes(record.status)) && <span style={{ color: '#999' }}>—</span>}
               </Space>
             ),
           },
