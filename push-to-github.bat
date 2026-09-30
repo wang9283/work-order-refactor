@@ -1,5 +1,5 @@
 @echo off
-cd /d C:\dev\docs\EastHope\Feed\work-order-refactor
+cd /d C:\Users\Miao\Projects\EastHope\Feed\work-order-refactor
 
 git init
 git add .
