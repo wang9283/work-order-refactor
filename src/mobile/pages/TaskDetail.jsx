@@ -180,7 +180,7 @@ export default function TaskDetail({ ticketId, onBack }) {
               </div>
             ))}
             {canSubmit && <List.Item>
-              <Button size="small" fill="outline" onClick={() => addSubRecord(sub.id)}>+ 添加{sub.name}记录</Button>
+              <Button size="small" fill="outline" onClick={() => addSubRecord(sub.id)}>+ 添加{sub.name}</Button>
             </List.Item>}
           </List>
         )
