@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import {
   Button, Table, Tag, Space, Drawer, Form, Input, Select, Switch, Divider,
-  Card, Row, Col, Alert, Popconfirm, message, TimePicker, InputNumber, Checkbox,
+  Card, Row, Col, Alert, Popconfirm, message, TimePicker, InputNumber, Checkbox, Collapse,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -143,37 +143,25 @@ export default function TicketTypeList({ config, orgId, onRefresh }) {
   const formOptions = useMemo(() => getVisibleForms(config, orgId), [config, orgId])
 
   const columns = [
-    { title: '名称', dataIndex: 'name', width: 140 },
+    {
+      title: '名称', dataIndex: 'name', width: 220,
+      render: (v, r) => (
+        <Space size={4}>
+          <span>{v}</span>
+          <Tag>{r.typeOrigin === 'group_standard' ? '集团标准' : '子公司自有'}</Tag>
+        </Space>
+      ),
+    },
     { title: '编码', dataIndex: 'code', width: 110 },
     {
-      title: '分类', dataIndex: 'categoryId', width: 110,
+      title: '任务大类', dataIndex: 'categoryId', width: 110,
       render: (v) => config.categories.find((c) => c.id === v)?.name || v,
-    },
-    {
-      title: '来源', dataIndex: 'typeOrigin', width: 110,
-      render: (v) => (v === 'group_standard' ? <Tag color="blue">集团标准</Tag> : <Tag>子公司自有</Tag>),
     },
     {
       title: '表单', key: 'form', width: 180,
       render: (_, r) => {
         const f = getFormById(config, r.formId)
         return f ? `${f.name} v${r.formVersion || getLatestPublishedVersion(f)?.versionNo || '—'}` : '—'
-      },
-    },
-    {
-      title: '触发方式', key: 'triggers', width: 200,
-      render: (_, r) => {
-        const rules = orgId === 'group' ? r.triggerRules : resolveTicketType(r, orgId).triggerRules || []
-        return rules.length ? rules.map((rule) => (
-          <Tag key={rule.id} color={TRIGGER_TYPE[rule.type]?.color}>{TRIGGER_TYPE[rule.type]?.label}</Tag>
-        )) : '—'
-      },
-    },
-    {
-      title: '时限', key: 'timeWindow', width: 90,
-      render: (_, r) => {
-        const tw = orgId === 'group' ? r.timeWindow : resolveTicketType(r, orgId).timeWindow
-        return tw?.enabled ? <Tag color="blue">启用</Tag> : <Tag>不启用</Tag>
       },
     },
     {
@@ -237,33 +225,6 @@ export default function TicketTypeList({ config, orgId, onRefresh }) {
                 <Select options={getCategories(config, orgId).map((c) => ({ label: c.name, value: c.id }))} />
               </Form.Item>
             </Col>
-            <Col span={8}>
-              <Form.Item name="ownerOrgId" label="所属组织">
-                <Select
-                  disabled={draft.typeOrigin === 'group_standard'}
-                  options={config.orgs.filter((o) => o.level !== 'region').map((o) => ({ label: o.name, value: o.id }))}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="typeOrigin" label="类型来源">
-                <Select
-                  disabled={editingId}
-                  options={[
-                    { label: '集团标准', value: 'group_standard' },
-                    { label: '子公司自有', value: 'subsidiary' },
-                  ]}
-                  onChange={(v) => {
-                    setDraft((d) => ({ ...d, typeOrigin: v, ownerOrgId: v === 'group_standard' ? 'group' : orgId }))
-                  }}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="remark" label="说明/备注">
-                <Input placeholder="选填" />
-              </Form.Item>
-            </Col>
           </Row>
 
           <Divider orientation="left">表单绑定</Divider>
@@ -296,63 +257,106 @@ export default function TicketTypeList({ config, orgId, onRefresh }) {
           <Divider orientation="left">触发方式</Divider>
           <TriggerEditor value={draft.triggerRules} onChange={(rules) => setDraft((d) => ({ ...d, triggerRules: rules }))} />
 
-          <Divider orientation="left">时限窗口</Divider>
-          <TimeWindowEditor
-            value={draft.timeWindow}
-            onChange={(tw) => setDraft((d) => ({ ...d, timeWindow: tw }))}
+          <Collapse
+            style={{ background: '#fff', marginTop: 8 }}
+            items={[
+              {
+                key: 'advanced',
+                label: '高级设置（基础扩展 / 时限 / 执行人 / 通知）',
+                children: (
+                  <>
+                    <Divider orientation="left" style={{ marginTop: 0 }}>基础扩展</Divider>
+                    <Row gutter={16}>
+                      <Col span={8}>
+                        <Form.Item name="ownerOrgId" label="所属组织">
+                          <Select
+                            disabled={draft.typeOrigin === 'group_standard'}
+                            options={config.orgs.filter((o) => o.level !== 'region').map((o) => ({ label: o.name, value: o.id }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name="typeOrigin" label="类型来源">
+                          <Select
+                            disabled={editingId}
+                            options={[
+                              { label: '集团标准', value: 'group_standard' },
+                              { label: '子公司自有', value: 'subsidiary' },
+                            ]}
+                            onChange={(v) => {
+                              setDraft((d) => ({ ...d, typeOrigin: v, ownerOrgId: v === 'group_standard' ? 'group' : orgId }))
+                            }}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name="remark" label="说明/备注">
+                          <Input placeholder="选填" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+
+                    <Divider orientation="left">时限窗口</Divider>
+                    <TimeWindowEditor
+                      value={draft.timeWindow}
+                      onChange={(tw) => setDraft((d) => ({ ...d, timeWindow: tw }))}
+                    />
+
+                    <Divider orientation="left">执行人范围</Divider>
+                    {orgId !== 'group' ? (
+                      <Row gutter={16}>
+                        <Col span={10}>
+                          <Form.Item label="默认执行人（一人或多人）">
+                            <Select
+                              mode="multiple"
+                              value={draft.executorScope?.defaultExecutors || []}
+                              options={(config.personnel || []).filter((p) => p.orgId === orgId && p.status === 'active').map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
+                              onChange={(v) => setDraft((d) => ({ ...d, executorScope: { ...(d.executorScope || {}), defaultExecutors: v } }))}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={14}>
+                          <Form.Item label="其他执行人（有资格执行）">
+                            <Select
+                              mode="multiple"
+                              value={draft.executorScope?.otherExecutors || []}
+                              options={(config.personnel || []).filter((p) => p.orgId === orgId && p.status === 'active').map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
+                              onChange={(v) => setDraft((d) => ({ ...d, executorScope: { ...(d.executorScope || {}), otherExecutors: v } }))}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    ) : (
+                      <Alert type="info" showIcon message="集团标准类型的执行人范围由各子公司独立维护；子公司自有类型请在对应子公司视角维护。" />
+                    )}
+
+                    <Divider orientation="left">生成通知</Divider>
+                    <Row gutter={16}>
+                      <Col span={6}>
+                        <Form.Item label="是否启用生成通知">
+                          <Switch checked={draft.notify?.enabled} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, enabled: v } }))} />
+                        </Form.Item>
+                      </Col>
+                      {draft.notify?.enabled && (
+                        <>
+                          <Col span={9}>
+                            <Form.Item label="通知对象">
+                              <Select mode="multiple" value={draft.notify.targets} options={NOTIFY_TARGETS} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, targets: v } }))} />
+                            </Form.Item>
+                          </Col>
+                          <Col span={9}>
+                            <Form.Item label="通知渠道">
+                              <Select mode="multiple" value={draft.notify.channels} options={NOTIFY_CHANNELS} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, channels: v } }))} />
+                            </Form.Item>
+                          </Col>
+                        </>
+                      )}
+                    </Row>
+                  </>
+                ),
+              },
+            ]}
           />
-
-            <Divider orientation="left">执行人范围</Divider>
-            {orgId !== 'group' ? (
-              <Row gutter={16}>
-                <Col span={10}>
-                  <Form.Item label="默认执行人（一人或多人）">
-                    <Select
-                      mode="multiple"
-                      value={draft.executorScope?.defaultExecutors || []}
-                      options={(config.personnel || []).filter((p) => p.orgId === orgId && p.status === 'active').map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
-                      onChange={(v) => setDraft((d) => ({ ...d, executorScope: { ...(d.executorScope || {}), defaultExecutors: v } }))}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={14}>
-                  <Form.Item label="其他执行人（有资格执行）">
-                    <Select
-                      mode="multiple"
-                      value={draft.executorScope?.otherExecutors || []}
-                      options={(config.personnel || []).filter((p) => p.orgId === orgId && p.status === 'active').map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
-                      onChange={(v) => setDraft((d) => ({ ...d, executorScope: { ...(d.executorScope || {}), otherExecutors: v } }))}
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-            ) : (
-              <Alert type="info" showIcon message="集团标准类型的执行人范围由各子公司独立维护；子公司自有类型请在对应子公司视角维护。" />
-            )}
-
-
-          <Divider orientation="left">生成通知</Divider>
-          <Row gutter={16}>
-            <Col span={6}>
-              <Form.Item label="是否启用生成通知">
-                <Switch checked={draft.notify?.enabled} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, enabled: v } }))} />
-              </Form.Item>
-            </Col>
-            {draft.notify?.enabled && (
-              <>
-                <Col span={9}>
-                  <Form.Item label="通知对象">
-                    <Select mode="multiple" value={draft.notify.targets} options={NOTIFY_TARGETS} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, targets: v } }))} />
-                  </Form.Item>
-                </Col>
-                <Col span={9}>
-                  <Form.Item label="通知渠道">
-                    <Select mode="multiple" value={draft.notify.channels} options={NOTIFY_CHANNELS} onChange={(v) => setDraft((d) => ({ ...d, notify: { ...d.notify, channels: v } }))} />
-                  </Form.Item>
-                </Col>
-              </>
-            )}
-          </Row>
 
           {orgId !== 'group' && (
             <Alert type="info" showIcon style={{ marginTop: 16 }} message="子公司视角：可覆盖本组织的触发、时限、通知与 API 开关；基础信息与表单绑定为只读。" />

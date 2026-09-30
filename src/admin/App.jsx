@@ -75,7 +75,7 @@ export default function App() {
           <Menu
             mode="inline"
             selectedKeys={[page]}
-              defaultOpenKeys={[]}
+              defaultOpenKeys={['types-group', 'execution-group']}
             onClick={handleMenuClick}
             items={[
               { key: 'home', icon: <HomeOutlined />, label: '首页' },
@@ -95,8 +95,8 @@ export default function App() {
                   icon: <FileTextOutlined />,
                   label: '排班与执行',
                   children: [
-                    { key: 'schedules', label: '月排班' },
                     { key: 'tickets', label: '工单管理' },
+                    { key: 'schedules', label: '月排班' },
                   ],
                 },
                 {
@@ -105,9 +105,11 @@ export default function App() {
                   label: '薪酬与报表',
                   children: [
                     { key: 'reports', label: '报表中心' },
-                    { key: 'contribution', label: '贡献调节' },
-                    { key: 'income-check', label: '收入核对' },
-                    { key: 'price-standards', label: '单价/计件标准' },
+                    { key: 'salary-sub', label: '薪酬核算（低频）', children: [
+                      { key: 'contribution', label: '贡献调节' },
+                      { key: 'income-check', label: '收入核对' },
+                      { key: 'price-standards', label: '单价/计件标准' },
+                    ] },
                   ],
                 },
                 
@@ -120,10 +122,12 @@ export default function App() {
                   icon: <ApartmentOutlined />,
                   label: '集成与审计',
                   children: [
-                    { key: 'external-systems', label: '外部系统/API Key' },
                     { key: 'notification-config', label: '工单通知配置' },
                     { key: 'operation-logs', label: '操作日志' },
                     { key: 'messages', label: '站内消息' },
+                    { key: 'integration-sub', label: '外部集成（低频）', children: [
+                      { key: 'external-systems', label: '外部系统/API Key' },
+                    ] },
                   ],
                 },
                 {

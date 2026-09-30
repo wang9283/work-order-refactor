@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { NavBar, TabBar, Space, Button } from 'antd-mobile'
-import { AppOutline, UnorderedListOutline, CalendarOutline } from 'antd-mobile-icons'
+import { AppOutline, UnorderedListOutline, UserOutline } from 'antd-mobile-icons'
 import { loadConfig, loadCurrentOrg } from '@shared/store'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
@@ -9,16 +9,38 @@ import Contribution from './pages/Contribution'
 import IncomeCheck from './pages/IncomeCheck'
 import MobileHome from './pages/MobileHome'
 import Messages from './pages/Messages'
+import Mine from './pages/Mine'
+
+// 内部状态 → 用户分组：对执行人隐藏「待数据 / 已超时」等概念，仅真发生时动态露出
+const STATUS_MAP = { pending: 'todo', inProgress: 'doing', completed: 'done', waitingData: 'waiting', timeout: 'timeout' }
+const MINE_TITLES = { schedule: '日排班', contribution: '贡献调节', income: '收入核对' }
 
 export default function App() {
   const [tab, setTab] = useState('home')
   const [taskStatus, setTaskStatus] = useState('all')
   const [selectedTicketId, setSelectedTicketId] = useState(null)
   const [showMessages, setShowMessages] = useState(false)
+  const [mineView, setMineView] = useState('menu')
   const config = loadConfig()
   const orgId = loadCurrentOrg()
   const currentOrg = config.orgs.find((o) => o.id === orgId)
   const roleName = orgId === 'group' ? '集团管理员' : '子公司配置管理员'
+
+  const renderMine = () => {
+    if (mineView === 'menu') {
+      return <Mine orgName={currentOrg?.name} roleName={roleName} onOpen={setMineView} />
+    }
+    return (
+      <div>
+        <NavBar onBack={() => setMineView('menu')} style={{ background: '#fff', marginBottom: 8 }}>
+          {MINE_TITLES[mineView]}
+        </NavBar>
+        {mineView === 'schedule' && <DaySchedule />}
+        {mineView === 'contribution' && <Contribution />}
+        {mineView === 'income' && <IncomeCheck />}
+      </div>
+    )
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: '#e9edf2', display: 'flex', justifyContent: 'center' }}>
@@ -35,17 +57,13 @@ export default function App() {
         </NavBar>
 
         {showMessages ? (
-            <Messages onBack={() => setShowMessages(false)} />
-          ) : selectedTicketId ? (
+          <Messages onBack={() => setShowMessages(false)} />
+        ) : selectedTicketId ? (
           <TaskDetail ticketId={selectedTicketId} onBack={() => setSelectedTicketId(null)} />
         ) : tab === 'home' ? (
-          <MobileHome onNavigate={(status) => { setTaskStatus(status); setTab('tasks') }} />
-        ) : tab === 'schedule' ? (
-          <DaySchedule />
-        ) : tab === 'contribution' ? (
-          <Contribution />
+          <MobileHome onNavigate={(s) => { setTaskStatus(STATUS_MAP[s] || s); setTab('tasks') }} />
         ) : tab === 'mine' ? (
-          <IncomeCheck />
+          renderMine()
         ) : (
           <TaskList onOpenTicket={setSelectedTicketId} status={taskStatus} onStatusChange={setTaskStatus} />
         )}
@@ -58,10 +76,8 @@ export default function App() {
         style={{ position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '100%', maxWidth: 430, background: '#fff' }}
       >
         <TabBar.Item key="home" icon={<AppOutline />} title="首页" />
-          <TabBar.Item key="tasks" icon={<UnorderedListOutline />} title="任务" />
-        <TabBar.Item key="schedule" icon={<CalendarOutline />} title="日排班" />
-          <TabBar.Item key="contribution" icon={<AppOutline />} title="贡献" />
-          <TabBar.Item key="mine" icon={<AppOutline />} title="收入" />
+        <TabBar.Item key="tasks" icon={<UnorderedListOutline />} title="任务" />
+        <TabBar.Item key="mine" icon={<UserOutline />} title="我的" />
       </TabBar>
     </div>
   )

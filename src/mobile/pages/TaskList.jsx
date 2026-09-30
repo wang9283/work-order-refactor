@@ -1,29 +1,46 @@
 import React, { useMemo, useState } from 'react'
 import { Button, List, Tag, Space, Input, Dialog, Tabs } from 'antd-mobile'
-import { loadConfig, loadCurrentOrg, getVisibleTicketTypes, addTicket } from '@shared/store'
+import { loadConfig, loadCurrentOrg, getVisibleTicketTypes, getResolvedTicketType, addTicket } from '@shared/store'
 import { TICKET_STATUS } from '@shared/constants'
 
-const STATUS_TABS = [
-  { key: 'all', title: '全部' },
-  { key: 'pending', title: '待开始' },
-  { key: 'inProgress', title: '执行中' },
-  { key: 'waitingData', title: '待数据' },
-  { key: 'timeout', title: '已超时' },
-  { key: 'completed', title: '已完成' },
-]
+// 内部 8 态 → 用户分组：待办 / 进行中 / 已结束；待数据、已超时仅在真发生时动态露出
+const STATUS_GROUPS = {
+  todo: ['unassigned', 'pending'],
+  doing: ['inProgress'],
+  waiting: ['waitingData'],
+  timeout: ['timeout'],
+  done: ['completed', 'closed', 'cancelled'],
+}
+const LEGACY_KEY = { pending: 'todo', inProgress: 'doing', completed: 'done', waitingData: 'waiting' }
 
 export default function TaskList({ onOpenTicket, status, onStatusChange }) {
   const [config, setConfig] = useState(() => loadConfig())
   const [quickCode, setQuickCode] = useState('')
   const orgId = loadCurrentOrg()
-  const activeStatus = status || 'all'
 
   const visibleTypes = useMemo(() => getVisibleTicketTypes(config, orgId), [config, orgId])
+  const orgTickets = useMemo(() => config.tickets.filter((t) => t.orgId === orgId), [config, orgId])
+
+  const tabs = useMemo(() => {
+    const base = [
+      { key: 'all', title: '全部' },
+      { key: 'todo', title: '待办' },
+      { key: 'doing', title: '进行中' },
+    ]
+    if (orgTickets.some((t) => t.status === 'waitingData')) base.push({ key: 'waiting', title: '待数据' })
+    if (orgTickets.some((t) => t.status === 'timeout')) base.push({ key: 'timeout', title: '已超时' })
+    base.push({ key: 'done', title: '已结束' })
+    return base
+  }, [orgTickets])
+
+  const requestedKey = LEGACY_KEY[status || 'all'] || status || 'all'
+  const activeStatus = tabs.some((t) => t.key === requestedKey) ? requestedKey : 'all'
+
   const myTickets = useMemo(() => {
-    const list = config.tickets.filter((t) => t.orgId === orgId)
-    if (activeStatus === 'all') return list
-    return list.filter((t) => t.status === activeStatus)
-  }, [config, orgId, activeStatus])
+    if (activeStatus === 'all') return orgTickets
+    const group = STATUS_GROUPS[activeStatus] || []
+    return orgTickets.filter((t) => group.includes(t.status))
+  }, [orgTickets, activeStatus])
 
   const refresh = () => setConfig(loadConfig())
 
@@ -42,6 +59,16 @@ export default function TaskList({ onOpenTicket, status, onStatusChange }) {
       return
     }
     createTask(type.id)
+  }
+
+  // 截止时间：优先取工单自身截止；否则由启用的时限窗口推导（当日 + 结束时间）
+  const deadlineOf = (ticket) => {
+    if (ticket.deadline) return ticket.deadline
+    const t = getResolvedTicketType(config, ticket.ticketTypeId, orgId)
+    if (t?.timeWindow?.enabled && ticket.createdAt) {
+      return `${ticket.createdAt.slice(0, 10)} ${t.timeWindow.endTime}`
+    }
+    return ''
   }
 
   return (
@@ -67,26 +94,31 @@ export default function TaskList({ onOpenTicket, status, onStatusChange }) {
         ))}
       </List>
 
-
-        <Tabs activeKey={activeStatus} onChange={onStatusChange} style={{ marginTop: 12 }}>
-          {STATUS_TABS.map((s) => (
-            <Tabs.Tab title={s.title} key={s.key} />
-          ))}
-        </Tabs>
+      <Tabs activeKey={activeStatus} onChange={onStatusChange} style={{ marginTop: 12 }}>
+        {tabs.map((s) => (
+          <Tabs.Tab title={s.title} key={s.key} />
+        ))}
+      </Tabs>
 
       <List header="我的工单" style={{ marginTop: 12 }}>
         {myTickets.length === 0 && <div style={{ padding: '16px 0', color: '#999', textAlign: 'center' }}>暂无工单</div>}
         {myTickets.map((ticket) => {
-          const type = config.ticketTypes.find((t) => t.id === ticket.ticketTypeId)
+          const type = getResolvedTicketType(config, ticket.ticketTypeId, orgId)
           const st = TICKET_STATUS[ticket.status] || { label: ticket.status, color: 'default' }
+          const deadline = deadlineOf(ticket)
           return (
             <List.Item
               key={ticket.id}
-              description={`${type?.name || '未知类型'} · ${ticket.createdAt}`}
+              description={
+                <span style={{ fontSize: 12, color: '#999' }}>
+                  {ticket.ticketNo || type?.code || ticket.ticketTypeId}
+                  {deadline ? ` · 截止 ${deadline}` : ''}
+                </span>
+              }
               extra={<Tag color={st.color}>{st.label}</Tag>}
               onClick={() => onOpenTicket(ticket.id)}
             >
-              {ticket.ticketNo || type?.code || ticket.ticketTypeId}
+              {type?.name || '未知类型'}
             </List.Item>
           )
         })}

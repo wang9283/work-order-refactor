@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { NavBar, Button, Input, TextArea, Selector, Toast, Tag, List, Space, Dialog, Popup } from 'antd-mobile'
+import { NavBar, Button, Input, TextArea, Selector, Toast, Tag, List, Space, Popup, Collapse } from 'antd-mobile'
 import { loadConfig, loadCurrentOrg, saveConfig, getResolvedTicketType, getFormById, getFormVersion, pushNotificationForEvent } from '@shared/store'
 import { TICKET_STATUS, FIELD_STRATEGY } from '@shared/constants'
 
@@ -71,14 +71,12 @@ export default function TaskDetail({ ticketId, onBack }) {
     return <TextArea value={value || ''} onChange={onChange} autoSize={{ minRows: 1, maxRows: 4 }} />
   }
 
-  const submit = (forceComplete = false) => {
+  const submit = () => {
     if (!ticket) return
-    let missingBlocking = []
-    let missingBackfill = []
+    const missingBlocking = []
     ;(version?.mainFields || []).forEach((f) => {
       const v = values[f.key]
       if (f.strategy === 'blocking' && !v) missingBlocking.push(f.name)
-      if (f.strategy === 'backfill' && !v) missingBackfill.push(f.name)
     })
     ;(version?.subForms || []).forEach((sub) => {
       const records = subRecords[sub.id] || []
@@ -87,24 +85,12 @@ export default function TaskDetail({ ticketId, onBack }) {
         sub.fields.forEach((f) => {
           const v = rec[f.key]
           if (f.strategy === 'blocking' && !v) missingBlocking.push(`${sub.name}-${f.name}`)
-          if (f.strategy === 'backfill' && !v) missingBackfill.push(`${sub.name}-${f.name}`)
         })
       })
     })
 
-    if (missingBlocking.length && !forceComplete) {
-      Toast.show({ content: `以下阻塞字段未到位：${missingBlocking.join('、')}` })
-      return
-    }
-    if (missingBackfill.length && !forceComplete) {
-      Dialog.confirm({
-        content: `以下字段允许后补，提交后工单进入待数据：${missingBackfill.join('、')}，是否提交？`,
-        onConfirm: () => doSubmit('waitingData'),
-      })
-      return
-    }
-    if (forceComplete) {
-      setForceOpen(true)
+    if (missingBlocking.length) {
+      Toast.show({ content: `以下必填字段未填写：${missingBlocking.join('、')}` })
       return
     }
     doSubmit('completed')
@@ -149,15 +135,29 @@ export default function TaskDetail({ ticketId, onBack }) {
         <List.Item extra={<Tag color={TICKET_STATUS[ticket.status]?.color}>{TICKET_STATUS[ticket.status]?.label}</Tag>}>
           {type.name}（{type.code}）
         </List.Item>
-        {(version.mainFields || []).map((f) => (
+        {(version.mainFields || []).filter((f) => f.required).map((f) => (
           <List.Item key={f.key} description={f.help}>
             <Space direction="vertical" style={{ width: '100%' }}>
-              <span style={{ fontSize: 13, color: '#888' }}>{f.name}{f.required ? ' *' : ''}</span>
+              <span style={{ fontSize: 13, color: '#888' }}>{f.name} *</span>
               {renderField(f, values[f.key], (v) => setValue(f.key, v))}
             </Space>
           </List.Item>
         ))}
       </List>
+
+      {(version.mainFields || []).some((f) => !f.required) && (
+        <Collapse style={{ marginTop: 12, background: '#fff', borderRadius: 8 }}>
+          <Collapse.Panel key="more" title="更多信息（选填）">
+            {(version.mainFields || []).filter((f) => !f.required).map((f) => (
+              <div key={f.key} style={{ padding: '8px 12px' }}>
+                <div style={{ fontSize: 13, color: '#888' }}>{f.name}</div>
+                {renderField(f, values[f.key], (v) => setValue(f.key, v))}
+                {f.help && <div style={{ fontSize: 12, color: '#bbb' }}>{f.help}</div>}
+              </div>
+            ))}
+          </Collapse.Panel>
+        </Collapse>
+      )}
 
       {(version.subForms || []).map((sub) => {
         const records = subRecords[sub.id] || []
@@ -184,8 +184,10 @@ export default function TaskDetail({ ticketId, onBack }) {
       })}
 
       <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
-        <Button block color="primary" onClick={() => submit(false)}>提交完工</Button>
-        <Button block fill="outline" onClick={() => submit(true)}>超时完成</Button>
+        <Button block color="primary" onClick={submit}>提交完工</Button>
+        {ticket.status === 'timeout' && (
+          <Button block fill="outline" onClick={() => setForceOpen(true)}>超时完成</Button>
+        )}
       </div>
 
         <Popup

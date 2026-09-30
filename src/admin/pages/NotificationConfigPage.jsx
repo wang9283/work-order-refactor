@@ -35,6 +35,19 @@ export default function NotificationConfigPage({ config, orgId, onRefresh }) {
 
   const rules = useMemo(() => getVisibleNotificationRules(config, orgId), [config, orgId])
 
+  // 首版只开放「创建 / 完成」事件与「站内消息」渠道；历史规则的其他值保留可编辑
+  const eventOptions = useMemo(() => {
+    const base = NOTIFY_EVENTS.filter((e) => ['created', 'completed'].includes(e.value))
+    const legacy = NOTIFY_EVENTS.find((e) => e.value === draft.event)
+    return legacy && !['created', 'completed'].includes(draft.event) ? [...base, legacy] : base
+  }, [draft.event])
+
+  const channelOptions = useMemo(() => {
+    const base = NOTIFY_CHANNELS.filter((c) => c.value === 'site')
+    const legacy = (draft.channels || []).filter((v) => v !== 'site').map((v) => NOTIFY_CHANNELS.find((c) => c.value === v)).filter(Boolean)
+    return [...base, ...legacy]
+  }, [draft.channels])
+
   const visibleTicketTypes = useMemo(() => {
     if (orgId === 'group') return config.ticketTypes || []
     return (config.ticketTypes || []).filter((t) => (
@@ -262,7 +275,7 @@ export default function NotificationConfigPage({ config, orgId, onRefresh }) {
             <Col span={12}>
               <Form.Item name="event" label="触发事件" rules={[{ required: true, message: '请选择触发事件' }]}>
                 <Select
-                  options={NOTIFY_EVENTS.map((e) => ({ label: e.label, value: e.value }))}
+                  options={eventOptions}
                   onChange={(v) => {
                     if (v === 'overdue') {
                       form.setFieldsValue({ reminderOperator: 'gte', reminderDays: form.getFieldValue('reminderDays') || 3 })
@@ -319,7 +332,7 @@ export default function NotificationConfigPage({ config, orgId, onRefresh }) {
             </Col>
             <Col span={12}>
               <Form.Item name="channels" label="通知渠道" rules={[{ required: true, message: '请选择通知渠道' }]}>
-                <Select mode="multiple" options={NOTIFY_CHANNELS.map((c) => ({ label: c.label, value: c.value }))} placeholder="可多选" />
+                <Select mode="multiple" options={channelOptions} placeholder="可多选" />
               </Form.Item>
             </Col>
           </Row>
