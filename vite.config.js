@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
   // Demo 直接复用旧原型 public 目录中的正式 logo / favicon / 图标
-  publicDir: fileURLToPath(new URL('../Prototype/feed-proto/public', import.meta.url)),
+  publicDir: fileURLToPath(new URL('../Feed/Prototype/feed-proto/public', import.meta.url)),
   plugins: [react()],
   resolve: {
     alias: {

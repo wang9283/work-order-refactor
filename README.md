@@ -1,11 +1,11 @@
 # 工单配置重构原型（work-order-refactor）
 
-独立的迭代原型目录，不修改现有 `Prototype/` 下的旧原型。
+独立的迭代原型目录（2026-10-10 迁出 Feed，位于 `EastHope/Feed-test-work-order-refactor`），不修改 `Feed/Prototype` 下的旧原型。
 
 ## 目录结构
 
 ```
-work-order-refactor/
+Feed-test-work-order-refactor/
 ├── docs/                    # 迭代方案文档
 ├── public/                  # logo 等静态资源
 ├── src/
@@ -20,7 +20,7 @@ work-order-refactor/
 
 ## 视觉
 
-- 复用旧原型 `Prototype/feed-proto/public` 中的正式 logo / favicon / 图标。
+- 复用旧原型 `Feed/Prototype/feed-proto/public` 中的正式 logo / favicon / 图标。
 - PC 端主题色：`#1677ff`，圆角 6。
 - App 端顶部导航使用主题色。
 
