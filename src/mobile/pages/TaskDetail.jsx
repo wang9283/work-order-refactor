@@ -63,7 +63,11 @@ export default function TaskDetail({ ticketId, onBack }) {
       )
     }
     if (field.type === 'photo' || field.type === 'attachment') {
-      return <Button size="small" fill="outline">上传/拍照（原型）</Button>
+      return (
+        <Button size="small" fill="outline" onClick={() => onChange(value || '已上传（原型）')}>
+          {value ? '已上传（原型）' : '上传/拍照（原型）'}
+        </Button>
+      )
     }
     if (field.type === 'datetime') {
       return <Input type="datetime-local" value={value || ''} onChange={onChange} />
@@ -76,24 +80,24 @@ export default function TaskDetail({ ticketId, onBack }) {
 
   const submit = () => {
     if (!ticket) return
-    const missingBlocking = []
+    const missingRequired = []
     ;(version?.mainFields || []).forEach((f) => {
       const v = values[f.key]
-      if (f.strategy === 'blocking' && !v) missingBlocking.push(f.name)
+      if ((f.required || f.strategy === 'blocking') && !v) missingRequired.push(f.name)
     })
     ;(version?.subForms || []).forEach((sub) => {
       const records = subRecords[sub.id] || []
-      if (records.length < sub.minRecords) missingBlocking.push(`${sub.name}至少${sub.minRecords}条`)
+      if (records.length < sub.minRecords) missingRequired.push(`${sub.name}至少${sub.minRecords}条`)
       records.forEach((rec) => {
         sub.fields.forEach((f) => {
           const v = rec[f.key]
-          if (f.strategy === 'blocking' && !v) missingBlocking.push(`${sub.name}-${f.name}`)
+          if ((f.required || f.strategy === 'blocking') && !v) missingRequired.push(`${sub.name}-${f.name}`)
         })
       })
     })
 
-    if (missingBlocking.length) {
-      Toast.show({ content: `以下必填字段未填写：${missingBlocking.join('、')}` })
+    if (missingRequired.length) {
+      Toast.show({ content: `以下必填字段未填写：${missingRequired.join('、')}` })
       return
     }
     doSubmit('completed')
