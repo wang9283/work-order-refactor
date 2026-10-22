@@ -196,3 +196,68 @@ export const secondmentSchema = z.object({
   message: '借调开始日期不能晚于结束日期',
   path: ['endDate'],
 })
+
+export const companyUpdateSchema = companySchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const productionBaseUpdateSchema = productionBaseSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const workAreaUpdateSchema = workAreaSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const productionLineUpdateSchema = productionLineSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const crewUpdateSchema = crewSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const personUpdateSchema = personSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const qualificationSchema = z.object({
+  code: z.string().trim().min(2).max(30),
+  name: z.string().trim().min(2).max(100),
+  description: z.string().trim().max(240).default(''),
+  status: z.enum(['active', 'inactive', 'archived']).default('active'),
+  revision: z.number().int().nonnegative().optional(),
+})
+
+export const qualificationUpdateSchema = qualificationSchema.partial().extend({
+  revision: z.number().int().nonnegative(),
+})
+
+export const personQualificationsSchema = z.object({
+  qualifications: z.array(z.object({
+    qualificationId: z.string().min(1),
+    validFrom: z.string().min(10),
+    validTo: z.string().min(10).nullable().default(null),
+    certificateNo: z.string().trim().max(80).default(''),
+  })).max(50),
+})
+
+export const crewMemberEndSchema = z.object({
+  endDate: z.string().min(10),
+  revision: z.number().int().nonnegative(),
+})
+
+export const revisionSchema = z.object({
+  revision: z.coerce.number().int().nonnegative(),
+})
+
+export const accessAssignmentSchema = z.object({
+  accountId: z.string().min(1),
+  roleId: z.string().min(1),
+  scope: z.object({
+    type: z.enum(['group', 'company', 'base', 'work_area']),
+    id: z.string().min(1),
+  }),
+  validFrom: z.string().min(10).nullable().default(null),
+  validTo: z.string().min(10).nullable().default(null),
+})
