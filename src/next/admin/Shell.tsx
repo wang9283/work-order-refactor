@@ -16,6 +16,7 @@ import { useAuth } from '@next/shared/auth'
 import DashboardPage from './pages/DashboardPage'
 import PlaceholderPage from './pages/PlaceholderPage'
 import OrgWorkspace from '@next/features/org/OrgWorkspace'
+import TemplateWorkspace from '@next/features/templates/TemplateWorkspace'
 
 const { Header, Sider, Content } = Layout
 
@@ -38,10 +39,10 @@ const pages: Record<PageKey, { title: string; element: React.ReactNode }> = {
   org: { title: '组织与作业结构', element: <OrgWorkspace initialSection="structure" /> },
   people: { title: '人员与借调', element: <OrgWorkspace initialSection="people" /> },
   access: { title: '角色与数据范围', element: <OrgWorkspace initialSection="access" /> },
-  templates: { title: '表单模板', element: <PlaceholderPage title="表单模板" description="Agent B 正在交付不可变版本和动态表单设计器。" /> },
-  'ticket-types': { title: '工单类型', element: <PlaceholderPage title="工单类型" description="Agent B 正在交付集团标准与公司本地类型。" /> },
-  profiles: { title: '交接班式作业配置', element: <PlaceholderPage title="交接班式作业配置" description="按基地、工区、产线和班组配置工单生成规则。" /> },
-  excel: { title: 'Excel 转表单', element: <PlaceholderPage title="Excel 转表单" description="Agent B 正在交付列识别、映射预览和草稿版本生成。" /> },
+  templates: { title: '表单模板', element: <TemplateWorkspace initialSection="forms" /> },
+  'ticket-types': { title: '工单类型', element: <TemplateWorkspace initialSection="types" /> },
+  profiles: { title: '交接班式作业配置', element: <TemplateWorkspace initialSection="profiles" /> },
+  excel: { title: 'Excel 转表单', element: <TemplateWorkspace initialSection="excel" /> },
   tickets: { title: '工单执行', element: <PlaceholderPage title="工单执行" description="Agent C 正在交付创建、分派、动态填报和状态流转。" /> },
   prices: { title: '计价标准', element: <PlaceholderPage title="计价标准" description="Agent C 正在交付按作业基地生效的版本化单价。" /> },
   payroll: { title: '计件与月度核算', element: <PlaceholderPage title="计件与月度核算" description="作业基地计价与月底发放公司分别记录。" /> },

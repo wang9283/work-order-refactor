@@ -10,6 +10,7 @@ import { authRoutes } from './modules/auth/routes'
 import { healthRoutes } from './modules/health/routes'
 import { orgRoutes } from './modules/org/routes'
 import { referenceRoutes } from './modules/reference/routes'
+import { templateRoutes } from './modules/templates/routes'
 import { resolve, dirname } from 'node:path'
 
 const app = Fastify({
@@ -40,6 +41,7 @@ app.addHook('onRequest', async (request) => {
 await app.register(healthRoutes, { prefix: '/api' })
 await app.register(authRoutes, { prefix: '/api/auth' })
 await app.register(orgRoutes, { prefix: '/api' })
+await app.register(templateRoutes, { prefix: '/api' })
 await app.register(referenceRoutes, { prefix: '/api' })
 
 const distPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')

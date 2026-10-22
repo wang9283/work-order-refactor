@@ -139,6 +139,15 @@ button, input { font: inherit; }
 .identity-block > span { width: 43px; height: 43px; display: grid; place-items: center; border-radius: 12px; background: #0b5d4b; color: #f2c14e; font-size: 17px; font-weight: 700; }
 .identity-block div { display: grid; gap: 3px; }
 .identity-block small, .status-card p { color: #8a958f; font-size: 12px; }
+.org-tree-card .ant-card-body { padding: 14px 10px; }
+.org-tree-card .ant-tree { background: transparent; }
+.schema-editor textarea {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: #16241f;
+  color: #d7e8df;
+}
 
 @media (max-width: 1300px) {
   .login-story { padding-left: 54px; padding-right: 54px; }
