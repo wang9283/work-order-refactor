@@ -45,7 +45,6 @@ await app.register(fastifyStatic, {
   root: distPath,
   wildcard: false,
 })
-app.get('/', async (_request, reply) => reply.sendFile('index.html'))
 app.get('/app', async (_request, reply) => reply.sendFile('app.html'))
 
 const port = Number(process.env.PORT || 3000)
