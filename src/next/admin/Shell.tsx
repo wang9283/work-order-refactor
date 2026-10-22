@@ -15,6 +15,7 @@ import { Avatar, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd'
 import { useAuth } from '@next/shared/auth'
 import DashboardPage from './pages/DashboardPage'
 import PlaceholderPage from './pages/PlaceholderPage'
+import OrgWorkspace from '@next/features/org/OrgWorkspace'
 
 const { Header, Sider, Content } = Layout
 
@@ -34,9 +35,9 @@ type PageKey =
 
 const pages: Record<PageKey, { title: string; element: React.ReactNode }> = {
   dashboard: { title: '集团总览', element: <DashboardPage /> },
-  org: { title: '组织与作业结构', element: <PlaceholderPage title="组织与作业结构" description="Agent A 正在交付基地、工区、产线和班组维护。" /> },
-  people: { title: '人员与借调', element: <PlaceholderPage title="人员与借调" description="Agent A 正在交付人员资格、班组成员和借调有效期。" /> },
-  access: { title: '角色与数据范围', element: <PlaceholderPage title="角色与数据范围" description="服务端权限底座已就绪，管理页面由 Agent A 交付。" /> },
+  org: { title: '组织与作业结构', element: <OrgWorkspace initialSection="structure" /> },
+  people: { title: '人员与借调', element: <OrgWorkspace initialSection="people" /> },
+  access: { title: '角色与数据范围', element: <OrgWorkspace initialSection="access" /> },
   templates: { title: '表单模板', element: <PlaceholderPage title="表单模板" description="Agent B 正在交付不可变版本和动态表单设计器。" /> },
   'ticket-types': { title: '工单类型', element: <PlaceholderPage title="工单类型" description="Agent B 正在交付集团标准与公司本地类型。" /> },
   profiles: { title: '交接班式作业配置', element: <PlaceholderPage title="交接班式作业配置" description="按基地、工区、产线和班组配置工单生成规则。" /> },
