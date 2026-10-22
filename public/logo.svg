@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40" viewBox="0 0 120 40">
-  <rect width="120" height="40" rx="6" fill="#1677ff"/>
-  <text x="60" y="25" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#fff" font-weight="600">东方希望</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="40" viewBox="0 0 128 40">
+  <rect width="128" height="40" rx="9" fill="#0b5d4b"/>
+  <path d="M14 10h15v5H20v4h8v5h-8v6h-6V10Z" fill="#f2c14e"/>
+  <text x="37" y="26" font-family="Microsoft YaHei, sans-serif" font-size="15" font-weight="700" fill="#fff">东方希望</text>
 </svg>
