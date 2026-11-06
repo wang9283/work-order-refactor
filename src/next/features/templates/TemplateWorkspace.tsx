@@ -1,3 +1,4 @@
+import SchemaEditor from './SchemaEditor'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   CheckCircleOutlined,
@@ -44,7 +45,9 @@ import type {
   FormTemplate,
   FormVersion,
   FormVersionSchema,
+  HandoverShiftProfile,
   OrgReferenceData,
+  TicketCatalog,
   TicketType,
   WorkProfile,
 } from '@contracts/index'
@@ -52,8 +55,16 @@ import { api, errorMessage } from '@next/shared/api'
 import { useAuth } from '@next/shared/auth'
 import { formatDateTime } from '@next/shared/format'
 import { ErrorBlock, LoadingBlock, PageHeader } from '@next/shared/ui'
+import { useAntFormUnsavedChanges } from '@next/shared/unsaved-changes'
 
 type Section = 'forms' | 'types' | 'profiles' | 'excel'
+
+const sectionHash: Record<Section, string> = {
+  forms: '#/templates',
+  types: '#/ticket-types',
+  profiles: '#/profiles',
+  excel: '#/excel',
+}
 
 interface FormDetail extends FormTemplate {
   versions: FormVersion[]
@@ -85,6 +96,8 @@ interface ExcelColumn {
 
 interface ExcelPreview {
   importId: string
+  ownerType: 'group' | 'company'
+  ownerId: string
   sheetName: string
   columns: ExcelColumn[]
   sampleRows: string[][]
@@ -114,19 +127,28 @@ function blankField(index: number): FormFieldDefinition {
   }
 }
 
-export default function TemplateWorkspace({ initialSection = 'forms' }: { initialSection?: Section }) {
+export default function TemplateWorkspace({ initialSection = 'forms', embedded = false }: { initialSection?: Section; embedded?: boolean }) {
   const { user } = useAuth()
   const { message } = App.useApp()
   const [section, setSection] = useState<Section>(initialSection)
   const [forms, setForms] = useState<FormDetail[]>([])
   const [types, setTypes] = useState<TicketType[]>([])
+  const [catalog, setCatalog] = useState<TicketCatalog | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState<string>()
   const [org, setOrg] = useState<OrgReferenceData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [formDrawer, setFormDrawer] = useState<{ detail?: FormDetail; version?: FormVersion } | null>(null)
   const [typeDrawer, setTypeDrawer] = useState(false)
+  const [profileDrawer, setProfileDrawer] = useState<HandoverShiftProfile | 'new' | null>(null)
+  const [profiles, setProfiles] = useState<HandoverShiftProfile[]>([])
   const [form] = Form.useForm()
   const [typeForm] = Form.useForm()
+  const [profileForm] = Form.useForm()
+  const [selectedFactoryId, setSelectedFactoryId] = useState<string>()
+  useAntFormUnsavedChanges(form, Boolean(formDrawer), '表单模板')
+  useAntFormUnsavedChanges(typeForm, typeDrawer, '工单类型')
+  useAntFormUnsavedChanges(profileForm, Boolean(profileDrawer), '交接班配置')
 
   const isGroupAdmin = user?.grants.some((grant) => grant.type === 'group' && grant.capability === 'form.manage') || false
 
@@ -134,15 +156,21 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
     setLoading(true)
     setError('')
     try {
-      const [formPage, typePage, orgData] = await Promise.all([
+      const [formPage, catalogData, orgData, profileData] = await Promise.all([
         api.getPage<FormTemplate>('/forms', { pageSize: 200 }),
-        api.getPage<TicketType>('/ticket-types', { pageSize: 200 }),
+        api.get<TicketCatalog>('/ticket-catalog'),
         api.get<OrgReferenceData>('/org/tree'),
+        api.get<HandoverShiftProfile[]>('/handover-profiles'),
       ])
       const formDetails = await Promise.all(formPage.items.map((item) => api.get<FormDetail>(`/forms/${item.id}`)))
       setForms(formDetails)
-      setTypes(typePage.items)
+      setCatalog(catalogData)
+      setTypes(catalogData.types)
+      setSelectedGroupId((current) => current && catalogData.groups.some((group) => group.id === current)
+        ? current
+        : catalogData.groups[0]?.id)
       setOrg(orgData)
+      setProfiles(profileData)
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -152,9 +180,13 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
 
   useEffect(() => { void load() }, [load])
 
+  useEffect(() => {
+    setSection(initialSection)
+  }, [initialSection])
+
   const ownerName = useMemo(() => {
     const map = new Map((org?.companies || []).map((company) => [company.id, company.name]))
-    map.set('group', '集团总部')
+    map.set('group', '饲料总部')
     return map
   }, [org])
 
@@ -249,43 +281,80 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
         message.error('请先发布表单版本')
         return
       }
-      const profile = {
-        siteId: values.siteId,
-        workAreaId: values.workAreaId || null,
-        productionLineId: values.productionLineId || null,
-        crewId: values.crewId || null,
-        shiftTemplateId: values.shiftTemplateId || null,
-        generationMode: values.generationMode || 'schedule',
-        handoverGrouping: values.handoverGrouping || 'shift',
-        handoverRequired: Boolean(values.handoverRequired),
-        timeWindowStart: values.timeWindowStart || null,
-        timeWindowEnd: values.timeWindowEnd || null,
-        earlyStartMinutes: values.earlyStartMinutes ?? 30,
-        lateEndMinutes: values.lateEndMinutes ?? 30,
-        assignmentMode: values.assignmentMode || 'roster_first',
-      }
-      let categoryId = values.categoryId
-      if (!categoryId) {
-        const created = await api.post<{ id: string }>('/ticket-categories', {
-          code: values.code,
-          name: values.name,
-          ownerType: values.ownerType,
-          ownerId: values.ownerId,
-        })
-        categoryId = created.id
-      }
       await api.post('/ticket-types', {
         code: values.code,
         name: values.name,
-        categoryId,
+        categoryId: values.categoryId,
         ownerType: values.ownerType,
         ownerId: values.ownerId,
         formTemplateId: publishedForm.id,
         formVersionId: publishedVersion.id,
-        workProfiles: [profile],
+        workProfiles: [],
+        locked: isGroupAdmin,
       })
       message.success('工单类型草稿已创建')
       setTypeDrawer(false)
+      await load()
+    } catch (reason) {
+      message.error(errorMessage(reason))
+    }
+  }
+
+  const openProfile = (record?: HandoverShiftProfile) => {
+    profileForm.resetFields()
+    if (record) {
+      setSelectedFactoryId(record.factoryId)
+      profileForm.setFieldsValue(record)
+    } else {
+      const firstFactory = org?.factories[0]
+      const firstShift = org?.shiftTemplates.find((shift) => shift.baseId === firstFactory?.baseId)
+      setSelectedFactoryId(firstFactory?.id)
+      profileForm.setFieldsValue({
+        factoryId: firstFactory?.id,
+        shiftTemplateId: firstShift?.id,
+        crewIds: [],
+        assignmentMode: 'roster_first',
+        handoverRequired: true,
+        earlyStartMinutes: 30,
+        lateEndMinutes: 30,
+        instruction: '',
+        status: 'active',
+      })
+    }
+    setProfileDrawer(record || 'new')
+  }
+
+  const saveProfile = async () => {
+    if (!org) return
+    const values = await profileForm.validateFields()
+    const factory = org.factories.find((item) => item.id === values.factoryId)
+    try {
+      const payload = {
+        ...values,
+        siteId: undefined,
+        revision: profileDrawer && profileDrawer !== 'new' ? profileDrawer.revision : undefined,
+      }
+      if (profileDrawer && profileDrawer !== 'new') {
+        await api.put(`/handover-profiles/${profileDrawer.id}`, payload)
+        message.success('交接班配置已保存')
+      } else {
+        await api.post('/handover-profiles', {
+          ...payload,
+          name: values.name || `${factory?.name || '饲料厂'} · ${org.shiftTemplates.find((item) => item.id === values.shiftTemplateId)?.name || '班次'}`,
+        })
+        message.success('交接班配置已创建')
+      }
+      setProfileDrawer(null)
+      await load()
+    } catch (reason) {
+      message.error(errorMessage(reason))
+    }
+  }
+
+  const archiveProfile = async (record: HandoverShiftProfile) => {
+    try {
+      await api.delete(`/handover-profiles/${record.id}?revision=${record.revision}`)
+      message.success('交接班配置已归档')
       await load()
     } catch (reason) {
       message.error(errorMessage(reason))
@@ -298,22 +367,35 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
 
   return (
     <div>
-      <PageHeader
+      {!embedded && <PageHeader
         eyebrow="GROUP STANDARD · LOCAL CONFIGURATION"
-        title="工单标准与交接班配置"
-        description="总部发布的表单与工单类型整份只读；子公司可复制为本地类型。工单按基地、工区、产线、班组和班次生成，Excel 只生成草稿，发布仍需人工确认。"
+        title="其他工单模板与类型"
+        description="维护其他工单填写内容与类型。"
         actions={<Button icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>}
-      />
+      />}
       <Tabs
         activeKey={section}
-        onChange={(key) => setSection(key as Section)}
+        tabBarStyle={embedded ? { display: 'none' } : undefined}
+        onChange={(key) => {
+          setSection(key as Section)
+          window.location.hash = sectionHash[key as Section]
+        }}
         items={[
           { key: 'forms', label: '表单模板与版本', children: <FormsPanel forms={forms} ownerName={ownerName} isGroupAdmin={isGroupAdmin} onOpen={openForm} onPublish={publish} onVersion={createVersion} /> },
-          { key: 'types', label: '工单类型', children: <TypesPanel types={types} ownerName={ownerName} canCreate={Boolean(user?.grants.some((grant) => grant.capability === 'ticket_type.manage'))} onCreate={() => {
+          { key: 'types', label: '工单类型', children: <TypesPanel catalog={catalog} selectedGroupId={selectedGroupId} onGroupChange={setSelectedGroupId} ownerName={ownerName} onTriggers={(type) => {
+            if (!type.systemManaged) window.location.hash = `#/trigger-rules?typeId=${encodeURIComponent(type.id)}`
+          }} canCreate={Boolean(user?.grants.some((grant) => grant.capability === 'ticket_type.manage'))} onCreate={() => {
             typeForm.resetFields()
+            const firstBase = org.bases[0]
+            const firstFactory = org.factories.find((factory) => factory.baseId === firstBase?.id) || org.factories[0]
             typeForm.setFieldsValue({
+              categoryId: selectedGroupId || catalog?.groups[0]?.id,
               ownerType: isGroupAdmin ? 'group' : 'company',
               ownerId: isGroupAdmin ? 'group' : org.companies.find((item) => !item.isGroup)?.id,
+              siteId: firstBase?.id,
+              factoryId: firstFactory?.id,
+              crewId: org.crews.find((crew) => crew.factoryId === firstFactory?.id)?.id,
+              shiftTemplateId: org.shiftTemplates.find((shift) => shift.baseId === firstBase?.id)?.id,
               generationMode: 'schedule',
               handoverGrouping: 'shift',
               handoverRequired: true,
@@ -323,10 +405,95 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
             })
             setTypeDrawer(true)
           }} /> },
-          { key: 'profiles', label: '交接班式作业配置', children: <ProfilesPanel types={types} ownerName={ownerName} /> },
-          { key: 'excel', label: 'Excel 转表单', children: <ExcelPanel isGroupAdmin={isGroupAdmin} companies={org.companies} onDone={() => void load()} /> },
         ]}
       />
+
+
+      <Drawer
+        width={620}
+        open={profileDrawer !== null}
+        onClose={() => setProfileDrawer(null)}
+        title={profileDrawer && profileDrawer !== 'new' ? '编辑交接班配置' : '新增交接班配置'}
+        extra={<Button type="primary" onClick={() => void saveProfile()}>保存</Button>}
+      >
+        <Form
+          form={profileForm}
+          layout="vertical"
+          onValuesChange={(changed) => {
+            if ('factoryId' in changed) {
+              const factory = org?.factories.find((item) => item.id === changed.factoryId)
+              setSelectedFactoryId(changed.factoryId)
+              profileForm.setFieldsValue({
+                shiftTemplateId: org?.shiftTemplates.find((shift) => shift.baseId === factory?.baseId)?.id,
+                crewIds: [],
+              })
+            }
+          }}
+        >
+          <Form.Item name="name" label="配置名称" rules={[{ required: true, min: 2 }]}>
+            <Input placeholder="如：酱料生产班 · 白班交接" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="factoryId" label="饲料厂" rules={[{ required: true }]}>
+                <Select options={org.factories.map((factory) => ({ value: factory.id, label: factory.name }))} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="shiftTemplateId" label="班次" rules={[{ required: true }]}>
+                <Select
+                  options={org.shiftTemplates
+                    .filter((shift) => shift.baseId === org.factories.find((factory) => factory.id === selectedFactoryId)?.baseId)
+                    .map((shift) => ({ value: shift.id, label: `${shift.name} ${shift.startTime}-${shift.endTime}` }))}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="crewIds" label="参与生产班" rules={[{ required: true }]}>
+            <Select
+              mode="multiple"
+              options={org.crews
+                .filter((crew) => crew.factoryId === selectedFactoryId)
+                .map((crew) => ({ value: crew.id, label: crew.name }))}
+            />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="assignmentMode" label="人员匹配">
+                <Select options={[
+                  { value: 'roster_first', label: '排班优先' },
+                  { value: 'manual', label: '人工指派' },
+                ]} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="earlyStartMinutes" label="允许提前（分钟）">
+                <InputNumber min={0} max={1440} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="lateEndMinutes" label="允许延后（分钟）">
+                <InputNumber min={0} max={1440} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="instruction" label="交接说明">
+            <Input.TextArea rows={4} maxLength={500} />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="handoverRequired" label="要求交接确认">
+                <Select options={[{ value: true, label: '是' }, { value: false, label: '否' }]} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="status" label="状态">
+                <Select options={[{ value: 'active', label: '启用' }, { value: 'inactive', label: '停用' }]} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Drawer>
 
       <Drawer
         width={620}
@@ -343,24 +510,17 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
           <Row gutter={12}>
             <Col span={10}>
               <Form.Item name="ownerType" label="归属" rules={[{ required: true }]}>
-                <Select disabled={Boolean(formDrawer?.detail)} options={isGroupAdmin ? [{ value: 'group', label: '集团标准' }, { value: 'company', label: '子公司本地' }] : [{ value: 'company', label: '子公司本地' }]} />
+                <Select disabled={Boolean(formDrawer?.detail)} options={isGroupAdmin ? [{ value: 'group', label: '饲料总部标准' }, { value: 'company', label: '公司本地' }] : [{ value: 'company', label: '公司本地' }]} />
               </Form.Item>
             </Col>
             <Col span={14}>
               <Form.Item name="ownerId" label="归属公司" rules={[{ required: true }]}>
-                <Select disabled={Boolean(formDrawer?.detail)} options={[{ value: 'group', label: '集团总部' }, ...org.companies.filter((item) => !item.isGroup).map((item) => ({ value: item.id, label: item.name }))]} />
+                <Select disabled={Boolean(formDrawer?.detail)} options={[{ value: 'group', label: '饲料总部' }, ...org.companies.filter((item) => !item.isGroup).map((item) => ({ value: item.id, label: item.name }))]} />
               </Form.Item>
             </Col>
           </Row>
-          <Alert
-            type="info"
-            showIcon
-            message="表单结构以 JSON 编辑，适合首版联调"
-            description="字段定义遵循 FormVersionSchema：mainFields / subForms / conditionRules。发布后版本永久只读，后续修改会生成新版本。"
-            style={{ marginBottom: 16 }}
-          />
-          <Form.Item name="schemaText" label="表单结构" rules={[{ required: true }]}>
-            <Input.TextArea className="schema-editor" rows={22} spellCheck={false} />
+          <Form.Item name="schemaText" label="表单字段" rules={[{ required: true }]}>
+            <SchemaEditor />
           </Form.Item>
         </Form>
       </Drawer>
@@ -377,32 +537,19 @@ export default function TemplateWorkspace({ initialSection = 'forms' }: { initia
             <Col span={12}><Form.Item name="code" label="类型编码" rules={[{ required: true }]}><Input /></Form.Item></Col>
             <Col span={12}><Form.Item name="name" label="类型名称" rules={[{ required: true }]}><Input /></Form.Item></Col>
           </Row>
+          <Form.Item name="categoryId" label="所属类型分组" rules={[{ required: true }]}>
+            <Select options={(catalog?.groups || []).filter((group) => group.status === 'active').map((group) => ({
+              value: group.id,
+              label: group.name,
+            }))} />
+          </Form.Item>
           <Row gutter={12}>
-            <Col span={10}><Form.Item name="ownerType" label="归属"><Select options={isGroupAdmin ? [{ value: 'group', label: '集团标准' }, { value: 'company', label: '子公司本地' }] : [{ value: 'company', label: '子公司本地' }]} /></Form.Item></Col>
-            <Col span={14}><Form.Item name="ownerId" label="归属公司"><Select options={[{ value: 'group', label: '集团总部' }, ...org.companies.filter((item) => !item.isGroup).map((item) => ({ value: item.id, label: item.name }))]} /></Form.Item></Col>
+            <Col span={10}><Form.Item name="ownerType" label="归属"><Select options={isGroupAdmin ? [{ value: 'group', label: '总部标准' }, { value: 'company', label: '公司本地' }] : [{ value: 'company', label: '公司本地' }]} /></Form.Item></Col>
+            <Col span={14}><Form.Item name="ownerId" label="归属公司"><Select options={[{ value: 'group', label: '饲料总部' }, ...org.companies.filter((item) => !item.isGroup).map((item) => ({ value: item.id, label: item.name }))]} /></Form.Item></Col>
           </Row>
           <Form.Item name="formTemplateId" label="已发布表单" rules={[{ required: true }]}>
             <Select options={forms.filter((item) => item.versions.some((version) => version.status === 'published')).map((item) => ({ value: item.id, label: `${item.name} · ${ownerName.get(item.ownerId)}` }))} />
           </Form.Item>
-          <Divider orientation="left">交接班式作业配置</Divider>
-          <Row gutter={12}>
-            <Col span={12}><Form.Item name="siteId" label="实际作业基地" rules={[{ required: true }]}><Select options={org.bases.map((item) => ({ value: item.id, label: item.name }))} /></Form.Item></Col>
-            <Col span={12}><Form.Item name="workAreaId" label="工区"><Select allowClear options={org.workAreas.map((item) => ({ value: item.id, label: item.name }))} /></Form.Item></Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={12}><Form.Item name="productionLineId" label="产线"><Select allowClear options={org.productionLines.map((item) => ({ value: item.id, label: item.name }))} /></Form.Item></Col>
-            <Col span={12}><Form.Item name="crewId" label="班组"><Select allowClear options={org.crews.map((item) => ({ value: item.id, label: item.name }))} /></Form.Item></Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={12}><Form.Item name="shiftTemplateId" label="班次模板"><Select allowClear options={[{ value: 'shift_qd_day', label: '青岛白班' }, { value: 'shift_qd_night', label: '青岛夜班' }, { value: 'shift_dz_day', label: '德州白班' }]} /></Form.Item></Col>
-            <Col span={12}><Form.Item name="generationMode" label="生成方式"><Select options={[{ value: 'schedule', label: '按排班生成' }, { value: 'manual', label: '手工创建' }, { value: 'api', label: '接口生成' }]} /></Form.Item></Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={8}><Form.Item name="timeWindowStart" label="允许提前"><Input placeholder="07:30" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="timeWindowEnd" label="允许延后"><Input placeholder="20:30" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="handoverRequired" label="要求交接" valuePropName="checked"><Switch /></Form.Item></Col>
-          </Row>
-          <Form.Item name="assignmentMode" label="人员匹配"><Select options={[{ value: 'roster_first', label: '排班优先' }, { value: 'qualification', label: '资格优先' }, { value: 'manual', label: '人工指派' }]} /></Form.Item>
         </Form>
       </Drawer>
     </div>
@@ -477,55 +624,165 @@ function FormsPanel({
 }
 
 function TypesPanel({
-  types,
+  catalog,
+  selectedGroupId,
+  onGroupChange,
   ownerName,
   canCreate,
   onCreate,
+  onTriggers,
 }: {
-  types: TicketType[]
+  catalog: TicketCatalog | null
+  selectedGroupId?: string
+  onGroupChange: (id: string) => void
   ownerName: Map<string, string>
   canCreate: boolean
   onCreate: () => void
+  onTriggers: (type: TicketType) => void
 }) {
+  const groups = catalog?.groups || []
+  const selectedGroup = groups.find((group) => group.id === selectedGroupId) || groups[0]
+  const types = selectedGroup?.types || []
   return (
-    <Card className="surface-card" title="工单类型" extra={canCreate && <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>新增类型</Button>}>
-      <Table
-        rowKey="id"
-        dataSource={types}
-        pagination={{ pageSize: 12 }}
-        columns={[
-          { title: '编码', dataIndex: 'code', width: 160 },
-          { title: '类型', dataIndex: 'name', render: (value, row) => <Space direction="vertical" size={0}><b>{value}</b><small>{ownerName.get(row.ownerId) || row.ownerId}</small></Space> },
-          { title: '来源', dataIndex: 'origin', render: (value: string) => value === 'group_standard' ? <Tag color="gold" icon={<LockOutlined />}>集团标准</Tag> : <Tag color="blue">子公司本地</Tag> },
-          { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'published' ? 'green' : value === 'draft' ? 'blue' : 'default'}>{statusLabel[value] || value}</Tag> },
-          { title: '修订', dataIndex: 'revision', width: 80 },
-        ]}
-      />
+    <Card
+      className="surface-card"
+      title="工单类型"
+      extra={canCreate && <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>新增类型</Button>}
+    >
+      <div style={{ display: 'grid', gridTemplateColumns: '190px minmax(0, 1fr)', gap: 18 }}>
+        <div style={{ borderRight: '1px solid #f0f0f0', paddingRight: 12 }}>
+          <Typography.Text type="secondary">类型分组</Typography.Text>
+          <Space direction="vertical" size={4} style={{ width: '100%', marginTop: 10 }}>
+            {groups.map((group) => (
+              <Button
+                key={group.id}
+                type={selectedGroup?.id === group.id ? 'primary' : 'text'}
+                block
+                onClick={() => onGroupChange(group.id)}
+                style={{ justifyContent: 'space-between', textAlign: 'left' }}
+              >
+                <span>{group.name}</span>
+                <small>{group.types.length}</small>
+              </Button>
+            ))}
+          </Space>
+        </div>
+        <div>
+          <div style={{ marginBottom: 12 }}>
+            <Typography.Title level={5} style={{ margin: 0 }}>{selectedGroup?.name || '类型分组'}</Typography.Title>
+            <Typography.Text type="secondary">选择具体类型维护标准来源与启停状态；系统内置项只读展示。</Typography.Text>
+          </div>
+          {types.length === 0
+            ? <Empty description="该分组暂无工单类型" />
+            : <Table
+              rowKey="id"
+              dataSource={types}
+              pagination={{ pageSize: 12 }}
+              rowClassName={(row) => row.systemManaged ? 'template-type-readonly' : ''}
+              columns={[
+                {
+                  title: '工单类型',
+                  dataIndex: 'name',
+                  render: (value: string, row) => <Space direction="vertical" size={0}>
+                    <Space><b>{value}</b>{row.systemManaged && <Tag color="default">系统内置</Tag>}</Space>
+                    <small>{row.code} · {ownerName.get(row.ownerId) || row.ownerId}</small>
+                  </Space>,
+                },
+                {
+                  title: '标准来源',
+                  dataIndex: 'origin',
+                  render: (value: string) => value === 'group_standard'
+                    ? <Tag color="gold" icon={<LockOutlined />}>饲料总部标准</Tag>
+                    : <Tag color="blue">公司本地</Tag>,
+                },
+                {
+                  title: '状态',
+                  dataIndex: 'status',
+                  render: (value: string) => <Tag color={value === 'published' ? 'green' : value === 'draft' ? 'blue' : 'default'}>{statusLabel[value] || value}</Tag>,
+                },
+                { title: '修订', dataIndex: 'revision', width: 80 },
+                {
+                  title: '操作',
+                  width: 120,
+                  render: (_, row) => row.systemManaged
+                    ? <Typography.Text type="secondary">只读</Typography.Text>
+                    : <Button size="small" onClick={() => onTriggers(row)}>触发规则</Button>,
+                },
+              ]}
+            />}
+        </div>
+      </div>
     </Card>
   )
 }
 
-function ProfilesPanel({ types, ownerName }: { types: TicketType[]; ownerName: Map<string, string> }) {
+function ProfilesPanel({
+  profiles,
+  org,
+  canManage,
+  onCreate,
+  onEdit,
+  onArchive,
+}: {
+  profiles: HandoverShiftProfile[]
+  org: OrgReferenceData
+  canManage: boolean
+  onCreate: () => void
+  onEdit: (record: HandoverShiftProfile) => void
+  onArchive: (record: HandoverShiftProfile) => void
+}) {
+  const factoryName = new Map(org.factories.map((factory) => [factory.id, factory.name]))
+  const crewName = new Map(org.crews.map((crew) => [crew.id, crew.name]))
+  const shiftName = new Map(org.shiftTemplates.map((shift) => [shift.id, `${shift.name} ${shift.startTime}-${shift.endTime}`]))
   return (
-    <Card className="surface-card" title="按作业位置生成工单">
+    <Card className="surface-card" title="交接班式作业配置" extra={canManage && <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>新增配置</Button>}>
       <Alert
         type="info"
         showIcon
         icon={<ThunderboltOutlined />}
         message="参照交接班表组织作业"
-        description="配置按实际作业基地、工区、产线、班组和班次生成工单；允许提前/延后时间窗口，可要求交接确认。没有匹配人员的工单进入待指派。"
+        description="每条配置绑定一个饲料厂、一个班次和多个生产班。创建工单时选中配置后自动带出作业基地、班次和默认生产班；没有匹配人员的工单进入待指派。"
         style={{ marginBottom: 18 }}
       />
-      <Timeline
-        items={types.map((type) => ({
-          color: type.status === 'published' ? 'green' : 'blue',
-          children: (
-            <Space direction="vertical">
-              <b>{type.name}</b>
-              <small>{ownerName.get(type.ownerId) || type.ownerId} · {type.code}</small>
-            </Space>
-          ),
-        }))}
+      <Table
+        rowKey="id"
+        dataSource={profiles}
+        pagination={{ pageSize: 12 }}
+        columns={[
+          {
+            title: '配置',
+            dataIndex: 'name',
+            render: (value: string, row) => <Space direction="vertical" size={0}>
+              <b>{value}</b>
+              <small>{org.bases.find((base) => base.id === row.siteId)?.name}</small>
+            </Space>,
+          },
+          { title: '饲料厂', dataIndex: 'factoryId', render: (value: string) => factoryName.get(value) || value },
+          { title: '班次', dataIndex: 'shiftTemplateId', render: (value: string) => shiftName.get(value) || value },
+          {
+            title: '生产班',
+            dataIndex: 'crewIds',
+            render: (value: string[]) => <Space wrap>{value.map((id) => <Tag key={id}>{crewName.get(id) || id}</Tag>)}</Space>,
+          },
+          {
+            title: '交接',
+            dataIndex: 'handoverRequired',
+            render: (value: boolean, row) => <Space direction="vertical" size={0}>
+              <Tag color={value ? 'gold' : 'default'}>{value ? '需确认' : '无需确认'}</Tag>
+              <small>提前 {row.earlyStartMinutes} / 延后 {row.lateEndMinutes} 分钟</small>
+            </Space>,
+          },
+          {
+            title: '操作',
+            width: 180,
+            render: (_, row) => canManage && <Space>
+              <Button type="link" icon={<EditOutlined />} onClick={() => onEdit(row)}>编辑</Button>
+              <Popconfirm title="归档此交接班配置？" onConfirm={() => onArchive(row)}>
+                <Button type="link" danger>归档</Button>
+              </Popconfirm>
+            </Space>,
+          },
+        ]}
       />
     </Card>
   )
@@ -552,8 +809,13 @@ function ExcelPanel({
     if (!raw) { message.error('请选择 .xlsx 文件'); return }
     const body = new FormData()
     body.append('file', raw)
+    const ownerType = isGroupAdmin ? 'group' : 'company'
+    const ownerId = isGroupAdmin ? 'group' : companies.find((item) => !item.isGroup)?.id || ''
     try {
-      const result = await api.upload<ExcelPreview>('/excel/imports/preview', body)
+      const result = await api.upload<ExcelPreview>('/excel/imports/preview', body, {
+        'X-Owner-Type': ownerType,
+        'X-Owner-Id': ownerId,
+      })
       setPreview(result)
       setMappings(Object.fromEntries(result.columns.map((column) => [column.sourceColumn, column.targetFieldKey])))
       setStep(1)
@@ -641,13 +903,11 @@ function ExcelPanel({
           </Col>
           <Col xs={24} xl={10}>
             <Typography.Title level={4}>生成草稿</Typography.Title>
-            <Form form={commitForm} layout="vertical" initialValues={{ ownerType: isGroupAdmin ? 'group' : 'company', ownerId: isGroupAdmin ? 'group' : companies.find((item) => !item.isGroup)?.id }}>
+            <Form form={commitForm} layout="vertical" initialValues={{ ownerType: preview.ownerType, ownerId: preview.ownerId }}>
               <Form.Item name="templateName" label="表单名称" rules={[{ required: true }]}><Input /></Form.Item>
               <Form.Item name="templateCode" label="模板编码" rules={[{ required: true }, { pattern: /^[A-Za-z][A-Za-z0-9_-]*$/, message: '以字母开头，仅字母数字下划线短横线' }]}><Input /></Form.Item>
-              <Row gutter={12}>
-                <Col span={10}><Form.Item name="ownerType" label="归属"><Select options={isGroupAdmin ? [{ value: 'group', label: '集团标准' }, { value: 'company', label: '子公司本地' }] : [{ value: 'company', label: '子公司本地' }]} /></Form.Item></Col>
-                <Col span={14}><Form.Item name="ownerId" label="公司"><Select options={[{ value: 'group', label: '集团总部' }, ...companies.filter((item) => !item.isGroup).map((item) => ({ value: item.id, label: item.name }))]} /></Form.Item></Col>
-              </Row>
+              <Form.Item name="ownerType" hidden><Input /></Form.Item>
+              <Form.Item name="ownerId" hidden><Input /></Form.Item>
               <Button type="primary" block onClick={() => void commit()}>生成草稿表单</Button>
             </Form>
           </Col>

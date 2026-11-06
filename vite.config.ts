@@ -20,9 +20,10 @@ export default defineConfig({
   },
   server: {
     host: '0.0.0.0',
-    port: 5173,
+    // 端口可通过环境变量覆盖，避免与同机的其他项目（如 Feed 原型）撞车后被误认为是本项目
+    port: Number(process.env.WEB_PORT) || 5174,
     proxy: {
-      '/api': 'http://127.0.0.1:3000',
+      '/api': `http://127.0.0.1:${process.env.API_PORT || 3000}`,
     },
   },
 })

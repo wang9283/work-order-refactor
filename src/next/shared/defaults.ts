@@ -25,6 +25,12 @@ export const statusLabels: Record<string, string> = {
   draft_created: '已生成草稿',
 }
 
+export const crewRoleLabels: Record<string, string> = {
+  leader: '班组长',
+  operator: '操作员',
+  support: '协作人员',
+}
+
 export function labelOf(value: string | null | undefined): string {
   return value ? statusLabels[value] || value : '—'
 }

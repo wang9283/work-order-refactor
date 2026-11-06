@@ -1,126 +1,251 @@
-import { useState } from 'react'
+import HierarchyWorkspace from '@next/features/org/HierarchyWorkspace'
+import { useEffect, useState } from 'react'
 import {
   ApartmentOutlined,
-  AuditOutlined,
-  DashboardOutlined,
+  CalendarOutlined,
   FileTextOutlined,
-  LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  ProfileOutlined,
   TeamOutlined,
-  WalletOutlined,
 } from '@ant-design/icons'
-import { Avatar, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd'
+import { Alert, App as AntApp, Avatar, Button, Layout, Menu, Select, Tag, Typography } from 'antd'
 import { useAuth } from '@next/shared/auth'
-import DashboardPage from './pages/DashboardPage'
-import PlaceholderPage from './pages/PlaceholderPage'
+import { errorMessage, hasAnyCapability } from '@next/shared/api'
+import type { Capability, DemoIdentityId } from '@contracts/index'
+import AuditWorkspace from '@next/features/audit/AuditWorkspace'
 import OrgWorkspace from '@next/features/org/OrgWorkspace'
-import TemplateWorkspace from '@next/features/templates/TemplateWorkspace'
+import WorkAreasWorkspace from '@next/features/org/WorkAreasWorkspace'
+import CrewWorkspace from '@next/features/org/CrewWorkspace'
+import ExecutionWorkspace from '@next/features/execution/ExecutionWorkspace'
+import SiteBusinessWorkspace from '@next/features/business/SiteBusinessWorkspace'
+import BusinessCatalogWorkspace from '@next/features/business/BusinessCatalogWorkspace'
+import MaterialsWorkspace from '@next/features/business/MaterialsWorkspace'
+import PlanningWorkspace from '@next/features/planning/PlanningWorkspace'
+import WorkloadsWorkspace from '@next/features/workloads/WorkloadsWorkspace'
+import OtherBusinessWorkspace from '@next/features/business/OtherBusinessWorkspace'
 
 const { Header, Sider, Content } = Layout
 
 type PageKey =
-  | 'dashboard'
+  | 'planning'
+  | 'workloads'
+  | 'other-config'
   | 'org'
+  | 'work-areas'
+  | 'crews'
+  | 'secondments'
   | 'people'
   | 'access'
-  | 'templates'
-  | 'ticket-types'
-  | 'profiles'
-  | 'excel'
+  | 'production-config'
+  | 'loading-config'
+  | 'business-catalogs'
+  | 'materials'
   | 'tickets'
-  | 'prices'
-  | 'payroll'
   | 'audit'
 
-const pages: Record<PageKey, { title: string; element: React.ReactNode }> = {
-  dashboard: { title: '集团总览', element: <DashboardPage /> },
-  org: { title: '组织与作业结构', element: <OrgWorkspace initialSection="structure" /> },
-  people: { title: '人员与借调', element: <OrgWorkspace initialSection="people" /> },
-  access: { title: '角色与数据范围', element: <OrgWorkspace initialSection="access" /> },
-  templates: { title: '表单模板', element: <TemplateWorkspace initialSection="forms" /> },
-  'ticket-types': { title: '工单类型', element: <TemplateWorkspace initialSection="types" /> },
-  profiles: { title: '交接班式作业配置', element: <TemplateWorkspace initialSection="profiles" /> },
-  excel: { title: 'Excel 转表单', element: <TemplateWorkspace initialSection="excel" /> },
-  tickets: { title: '工单执行', element: <PlaceholderPage title="工单执行" description="Agent C 正在交付创建、分派、动态填报和状态流转。" /> },
-  prices: { title: '计价标准', element: <PlaceholderPage title="计价标准" description="Agent C 正在交付按作业基地生效的版本化单价。" /> },
-  payroll: { title: '计件与月度核算', element: <PlaceholderPage title="计件与月度核算" description="作业基地计价与月底发放公司分别记录。" /> },
-  audit: { title: '操作审计', element: <PlaceholderPage title="操作审计" description="统一审计底座已就绪，列表页面待集成。" /> },
+const routeMap: Partial<Record<string, PageKey>> = {
+  dashboard: 'planning',
+  planning: 'planning',
+  workloads: 'workloads',
+  'other-config': 'other-config',
+  org: 'org',
+  'work-areas': 'work-areas',
+  crews: 'crews',
+  secondments: 'secondments',
+  people: 'people',
+  access: 'access',
+  templates: 'other-config',
+  'ticket-types': 'other-config',
+  'business-config': 'production-config',
+  'production-config': 'production-config',
+  'loading-config': 'loading-config',
+  'business-catalogs': 'business-catalogs',
+  materials: 'materials',
+  'trigger-rules': 'other-config',
+  profiles: 'other-config',
+  excel: 'other-config',
+  tickets: 'tickets',
+  prices: 'production-config',
+  payroll: 'workloads',
+  audit: 'audit',
 }
 
-const menuItems = [
-  { key: 'dashboard', icon: <DashboardOutlined />, label: '集团总览' },
-  {
-    key: 'org-group',
-    icon: <ApartmentOutlined />,
-    label: '组织与主数据',
-    children: [
-      { key: 'org', label: '组织与作业结构' },
-      { key: 'people', label: '人员与借调' },
-      { key: 'access', label: '角色与数据范围' },
-    ],
-  },
-  {
-    key: 'standard-group',
-    icon: <ProfileOutlined />,
-    label: '工单标准',
-    children: [
-      { key: 'templates', label: '表单模板' },
-      { key: 'ticket-types', label: '工单类型' },
-      { key: 'profiles', label: '交接班式作业配置' },
-      { key: 'excel', label: 'Excel 转表单' },
-    ],
-  },
-  {
-    key: 'execution-group',
-    icon: <FileTextOutlined />,
-    label: '执行与核算',
-    children: [
-      { key: 'tickets', label: '工单执行' },
-      { key: 'prices', label: '计价标准' },
-      { key: 'payroll', label: '计件与月度核算' },
-    ],
-  },
-  { key: 'audit', icon: <AuditOutlined />, label: '操作审计' },
-]
+const pages: Record<PageKey, { title: string; element: React.ReactNode }> = {
+  planning: { title: '排班计划', element: <PlanningWorkspace /> },
+  workloads: { title: '工作量管理', element: <WorkloadsWorkspace /> },
+  'other-config': { title: '其他工单配置', element: <OtherBusinessWorkspace /> },
+  org: { title: '组织管理', element: <HierarchyWorkspace /> },
+  'work-areas': { title: '作业区域', element: <WorkAreasWorkspace /> },
+  crews: { title: '生产班组', element: <CrewWorkspace /> },
+  secondments: { title: '借调管理', element: <OrgWorkspace initialSection="secondment" /> },
+  people: { title: '人员管理', element: <OrgWorkspace initialSection="people" /> },
+  access: { title: '角色与数据范围', element: <OrgWorkspace initialSection="access" /> },
+  'production-config': { title: '生产配置', element: <SiteBusinessWorkspace businessKind="production" /> },
+  'loading-config': { title: '装卸配置', element: <SiteBusinessWorkspace businessKind="loading" /> },
+  'business-catalogs': { title: '作业字典', element: <BusinessCatalogWorkspace /> },
+  materials: { title: '物料档案', element: <MaterialsWorkspace /> },
+  tickets: { title: '工单管理', element: <ExecutionWorkspace initialSection="tickets" /> },
+  audit: { title: '操作审计', element: <AuditWorkspace /> },
+}
+
+const pageCapabilities: Record<PageKey, Capability[]> = {
+  planning: ['ticket.assign'],
+  tickets: ['ticket.view', 'ticket.execute'],
+  workloads: ['ticket.assign', 'payroll.view'],
+  org: ['org.view'],
+  'work-areas': ['org.view'],
+  crews: ['crew.view'],
+  secondments: ['secondment.view'],
+  people: ['person.view'],
+  access: ['access.manage'],
+  'production-config': ['ticket_type.view', 'price.view'],
+  'loading-config': ['ticket_type.view', 'price.view'],
+  'business-catalogs': ['business_catalog.manage'],
+  materials: ['ticket_type.view', 'price.view'],
+  'other-config': ['form.view', 'ticket_type.view'],
+  audit: ['audit.view'],
+}
 
 export default function Shell() {
-  const { user, logout } = useAuth()
-  const [page, setPage] = useState<PageKey>('dashboard')
-  const [collapsed, setCollapsed] = useState(false)
+  const {
+    user,
+    identities,
+    activeIdentity,
+    bases,
+    activeBase,
+    switchIdentity,
+    switchBase,
+    contextVersion,
+    error,
+  } = useAuth()
+  const { message } = AntApp.useApp()
+  const route = window.location.hash.replace(/^#\/?/, '').split('?')[0]
+  const [page, setPage] = useState<PageKey>(routeMap[route] || 'planning')
+  const [collapsed, setCollapsed] = useState(window.innerWidth < 1100)
+  const canOpen = (key: PageKey) => hasAnyCapability(user, pageCapabilities[key])
+  const allowedPages = (Object.keys(pageCapabilities) as PageKey[]).filter(canOpen)
+  const firstAllowed = allowedPages[0] || 'tickets'
+  const visiblePage = canOpen(page) ? page : firstAllowed
+  const basicChildren = [
+    canOpen('org') ? { key: 'org', label: '组织管理' } : null,
+    canOpen('work-areas') ? { key: 'work-areas', label: '作业位置' } : null,
+    canOpen('people') ? { key: 'people', label: '人员管理' } : null,
+    canOpen('crews') ? { key: 'crews', label: '班组与班次' } : null,
+    canOpen('secondments') ? { key: 'secondments', label: '借调管理' } : null,
+    canOpen('materials') ? { key: 'materials', label: '产品物料' } : null,
+    canOpen('business-catalogs') ? { key: 'business-catalogs', label: '作业字典' } : null,
+  ].filter((item): item is { key: PageKey; label: string } => Boolean(item))
+  const configurationChildren = [
+    basicChildren.length ? { key: 'basic-group', label: '基础资料', children: basicChildren } : null,
+    canOpen('production-config') ? { key: 'production-config', label: '生产配置' } : null,
+    canOpen('loading-config') ? { key: 'loading-config', label: '装卸配置' } : null,
+    canOpen('other-config') ? { key: 'other-config', label: '其他工单配置' } : null,
+    canOpen('access') ? { key: 'access', label: '权限与数据范围' } : null,
+    canOpen('audit') ? { key: 'audit', label: '操作审计' } : null,
+  ].filter(Boolean)
+  const menuItems = [
+    canOpen('planning') ? { key: 'planning', icon: <CalendarOutlined />, label: '排班计划' } : null,
+    canOpen('tickets') ? { key: 'tickets', icon: <FileTextOutlined />, label: '工单管理' } : null,
+    canOpen('workloads') ? { key: 'workloads', icon: <TeamOutlined />, label: '工作量管理' } : null,
+    configurationChildren.length ? {
+      key: 'configuration-group',
+      icon: <ApartmentOutlined />,
+      label: '基础与配置',
+      children: configurationChildren,
+    } : null,
+  ].filter(Boolean)
+
+  const navigate = (key: PageKey) => {
+    setPage(key)
+    window.location.hash = `#/${key}`
+  }
+
+  const pendingTicketFocus = (id: string) => {
+    setPage('tickets')
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('operations-ticket-focus', { detail: id }))
+    }, 0)
+  }
+
+  useEffect(() => {
+    if (!window.location.hash) window.history.replaceState(null, '', '#/planning')
+  }, [])
+
+  useEffect(() => {
+    if (!canOpen(page)) navigate(firstAllowed)
+  }, [user?.accountId])
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = window.location.hash.replace(/^#\/?/, '').split('?')[0]
+      setPage(routeMap[next] || 'planning')
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+  useEffect(() => {
+    // Independent pages can request a configuration tab or a filtered ticket
+    // list without duplicating that navigation inside their own toolbar.
+    const applyQuery = () => {
+      const hash = window.location.hash
+      const query = new URLSearchParams(hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '')
+      const section = query.get('section')
+      const ticketId = query.get('ticketId')
+      if (section === 'dispatch') {
+        setPage('other-config')
+        window.dispatchEvent(new CustomEvent('other-config-section', { detail: 'dispatch' }))
+      }
+      if (ticketId) {
+        setPage('tickets')
+        pendingTicketFocus(ticketId)
+      }
+    }
+    applyQuery()
+    window.addEventListener('hashchange', applyQuery)
+    return () => window.removeEventListener('hashchange', applyQuery)
+  }, [])
+  useEffect(() => {
+    const onPlanningFocus = (event: Event) => {
+      const date = (event as CustomEvent<string>).detail
+      if (date) setPage('planning')
+    }
+    window.addEventListener('planning-date-focus', onPlanningFocus)
+    return () => window.removeEventListener('planning-date-focus', onPlanningFocus)
+  }, [])
 
   return (
     <Layout className="app-layout">
       <Sider
         width={244}
         collapsedWidth={72}
+        breakpoint="lg"
+        onBreakpoint={(broken) => { if (broken) setCollapsed(true) }}
         collapsible
         trigger={null}
         collapsed={collapsed}
         className="app-sider"
       >
         <div className="sider-brand">
-          <img src="/logo.svg" alt="东方希望" />
-          {!collapsed && <Tag color="gold">V3 全栈</Tag>}
+          <img src="/logo.svg" alt="饲料总部" />
+          {!collapsed && <Tag color="gold">饲料作业</Tag>}
         </div>
         {!collapsed && (
           <div className="sider-context">
-            <span>集团作业新版</span>
-            <small>独立于 v2.1 预览原型</small>
+            <span>饲料作业管理</span>
+            <small>排班 · 工单 · 计件工作量</small>
           </div>
         )}
         <Menu
           mode="inline"
           theme="dark"
           selectedKeys={[page]}
-          defaultOpenKeys={['org-group', 'standard-group', 'execution-group']}
+          defaultOpenKeys={[]}
           items={menuItems}
-          onClick={({ key }) => setPage(key as PageKey)}
+          onClick={({ key }) => navigate(key as PageKey)}
           className="sider-menu"
         />
       </Sider>
-      <Layout>
+      <Layout style={{ minWidth: 0 }}>
         <Header className="app-header">
           <Button
             type="text"
@@ -129,24 +254,60 @@ export default function Shell() {
             aria-label={collapsed ? '展开导航' : '收起导航'}
           />
           <div className="header-breadcrumb">
-            <span>集团作业新版</span>
+            <span>饲料作业管理</span>
             <b>/</b>
-            <strong>{pages[page].title}</strong>
+            <strong>{pages[visiblePage].title}</strong>
           </div>
           <div className="header-actions">
-            <Tag color="green">服务端鉴权</Tag>
-            <a href="/app.html" target="_blank" rel="noreferrer">移动执行</a>
-            <Avatar className="user-avatar">{(user?.displayName || '用').slice(0, 1)}</Avatar>
-            <div className="user-copy">
-              <Typography.Text strong>{user?.displayName}</Typography.Text>
-              <small>{user?.assignments[0]?.role.name || '未分配角色'}</small>
+            <a href="/app.html" target="_blank" rel="noreferrer">员工 App</a>
+            <div className="base-picker">
+              <span>生产基地</span>
+              <Select
+                value={activeBase?.id}
+                onChange={(value) => {
+                  void switchBase(value).catch((reason) => {
+                    void message.error(errorMessage(reason))
+                  })
+                }}
+                options={bases.map((base) => ({
+                  value: base.id,
+                  label: base.name,
+                  title: `${base.name} · ${base.code}`,
+                }))}
+                popupMatchSelectWidth={260}
+                aria-label="切换生产基地"
+              />
             </div>
-            <Tooltip title="退出登录">
-              <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()} aria-label="退出登录" />
-            </Tooltip>
+            <Avatar className="user-avatar">{(user?.displayName || '用').slice(0, 1)}</Avatar>
+            <div className="identity-picker">
+              <span>当前身份</span>
+              <Select<DemoIdentityId>
+                value={activeIdentity?.id}
+                onChange={(value) => void switchIdentity(value)}
+                options={identities.map((identity) => ({
+                  value: identity.id,
+                  disabled: !identity.available,
+                  label: identity.label,
+                  title: `${identity.label} · ${identity.displayName}`,
+                }))}
+                optionRender={(option) => {
+                  const identity = identities.find((item) => item.id === option.value)
+                  return <div className="identity-option">
+                    <b>{identity?.label}</b>
+                    <small>{identity?.description}</small>
+                  </div>
+                }}
+                popupMatchSelectWidth={300}
+                aria-label="切换角色身份"
+              />
+              <Typography.Text>{user?.displayName}</Typography.Text>
+            </div>
           </div>
         </Header>
-        <Content className="app-content">{pages[page].element}</Content>
+        <Content className="app-content" key={`${user?.accountId}:${contextVersion}`}>
+          {error && <Alert className="context-switch-error" type="error" showIcon message={error} />}
+          {pages[visiblePage].element}
+        </Content>
       </Layout>
     </Layout>
   )

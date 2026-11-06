@@ -1,16 +1,24 @@
 import { useEffect, useState } from 'react'
-import { Button, ConfigProvider, Tag } from 'antd'
+import { App as AntApp, Button, ConfigProvider, Tag } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { AuthProvider, useAuth } from '@next/shared/auth'
-import LoginPage from './auth/LoginPage'
 import Shell from './Shell'
 
 function AdminGate() {
-  const { user, loading } = useAuth()
-  if (loading) {
-    return <div className="boot-screen"><div className="boot-mark">G</div><span>正在连接集团作业台</span></div>
+  const { user, loading, switching, error, refresh } = useAuth()
+  if (loading || switching) {
+    return <div className="boot-screen"><div className="boot-mark">F</div><span>正在连接饲料总部作业台</span></div>
   }
-  if (!user) return <LoginPage />
+  if (!user) {
+    return (
+      <main className="context-error-screen">
+        <img src="/logo.svg" alt="饲料总部" />
+        <h1>作业台暂时无法进入</h1>
+        <p>{error || '没有可用的演示身份'}</p>
+        <Button type="primary" onClick={() => void refresh()}>重新连接</Button>
+      </main>
+    )
+  }
   return <Shell />
 }
 
@@ -30,9 +38,11 @@ export default function App() {
         },
       }}
     >
-      <AuthProvider>
-        <AdminGate />
-      </AuthProvider>
+      <AntApp>
+        <AuthProvider surface="admin">
+          <AdminGate />
+        </AuthProvider>
+      </AntApp>
     </ConfigProvider>
   )
 }

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { loginSchema } from '../../../packages/contracts/src'
+import { demoBaseSwitchSchema, demoLoginSchema, loginSchema } from '../../../packages/contracts/src'
 import { one } from '../../db/database'
 import {
   bearerToken,
@@ -12,6 +12,7 @@ import {
 import { parseInput, success } from '../../core/http'
 import { AppError } from '../../core/errors'
 import { verifyPassword } from '../../core/password'
+import { demoAuthOptions, demoBaseSwitch, demoLogin, demoSession } from './demo'
 
 interface AccountRow {
   id: string
@@ -23,6 +24,22 @@ interface AccountRow {
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
+  app.get('/demo-options', async (request) => success(request, demoAuthOptions()))
+
+  app.post('/demo-login', async (request) => {
+    const input = parseInput(demoLoginSchema, request.body)
+    return success(request, demoLogin(input))
+  })
+
+  app.get('/demo-session', async (request) => {
+    return success(request, demoSession(requireAuth(request)))
+  })
+
+  app.post('/demo-base', async (request) => {
+    const input = parseInput(demoBaseSwitchSchema, request.body)
+    return success(request, demoBaseSwitch(requireAuth(request), input.baseId))
+  })
+
   app.post('/login', async (request) => {
     const input = parseInput(loginSchema, request.body)
     const account = one<AccountRow>('SELECT * FROM accounts WHERE username = ?', [input.username])

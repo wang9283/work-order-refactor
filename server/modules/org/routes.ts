@@ -4,9 +4,16 @@ import {
   companySchema,
   companyUpdateSchema,
   crewMemberEndSchema,
+  crewMemberUpdateSchema,
+  crewMembersBatchSchema,
+  crewScopesSchema,
   crewMembershipSchema,
   crewSchema,
   crewUpdateSchema,
+  factorySchema,
+  factoryUpdateSchema,
+  managementGroupSchema,
+  managementGroupUpdateSchema,
   pageQuerySchema,
   personQualificationsSchema,
   personSchema,
@@ -19,6 +26,7 @@ import {
   qualificationUpdateSchema,
   revisionSchema,
   secondmentSchema,
+  secondmentUpdateSchema,
   workAreaSchema,
   workAreaUpdateSchema,
 } from '../../../packages/contracts/src'
@@ -26,10 +34,12 @@ import { requireAuth } from '../../core/auth'
 import { parseInput, success } from '../../core/http'
 import {
   addCrewMember,
+  addCrewMembers,
   archiveArea,
   archiveBase,
   archiveCompany,
   archiveCrew,
+  archiveFactory,
   archiveLine,
   archivePerson,
   archiveQualification,
@@ -39,7 +49,9 @@ import {
   createBase,
   createCompany,
   createCrew,
+  createFactory,
   createLine,
+  createManagementGroup,
   createPerson,
   createQualification,
   createSecondment,
@@ -51,19 +63,27 @@ import {
   listBases,
   listCompaniesFor,
   listCrewMembers,
+  listCrewScopes,
   listCrews,
+  listFactories,
   listLines,
   listPeople,
+  listPersonCrewRelations,
   listQualifications,
   listSecondments,
+  listShiftTemplates,
   listWorkAreas,
   readPerson,
   replacePersonQualifications,
+  replaceCrewScopes,
   updateArea,
   updateBase,
   updateCompany,
   updateCrew,
+  updateCrewMember,
+  updateFactory,
   updateLine,
+  updateManagementGroup,
   updatePerson,
   updateQualification,
   updateSecondment,
@@ -101,6 +121,12 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     return paged(request, listWorkAreas(auth, query))
   })
 
+  app.get('/org/factories', async (request) => {
+    const auth = requireAuth(request)
+    const query = parseInput(pageQuerySchema, request.query)
+    return paged(request, listFactories(auth, query))
+  })
+
   app.get('/org/production-lines', async (request) => {
     const auth = requireAuth(request)
     const query = parseInput(pageQuerySchema, request.query)
@@ -111,6 +137,12 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(request)
     const query = parseInput(pageQuerySchema, request.query)
     return paged(request, listQualifications(auth, query))
+  })
+
+  app.get('/org/shift-templates', async (request) => {
+    const auth = requireAuth(request)
+    const query = parseInput(pageQuerySchema, request.query)
+    return paged(request, listShiftTemplates(auth, query))
   })
 
   app.get('/org/people', async (request) => {
@@ -124,16 +156,27 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     return success(request, readPerson(auth, request.params.id))
   })
 
+  app.get<{ Params: IdParams }>('/org/people/:id/crew-relations', async (request) => {
+    const auth = requireAuth(request)
+    return success(request, listPersonCrewRelations(auth, request.params.id))
+  })
+
   app.get('/org/crews', async (request) => {
     const auth = requireAuth(request)
     const query = parseInput(pageQuerySchema, request.query)
     return paged(request, listCrews(auth, query))
   })
 
-  app.get<{ Params: CrewIdParams; Querystring: { asOf?: string } }>('/org/crews/:crewId/members', async (request) => {
+  app.get<{ Params: CrewIdParams; Querystring: { asOf?: string; all?: string } }>('/org/crews/:crewId/members', async (request) => {
     const auth = requireAuth(request)
-    return success(request, listCrewMembers(auth, request.params.crewId, request.query.asOf))
+    return success(request, listCrewMembers(auth, request.params.crewId, request.query.asOf, request.query.all === 'true'))
   })
+
+  app.get<{ Params: CrewIdParams }>('/org/crews/:crewId/scopes', async (request) =>
+    success(request, listCrewScopes(requireAuth(request), request.params.crewId)))
+
+  app.put<{ Params: CrewIdParams }>('/org/crews/:crewId/scopes', async (request) =>
+    success(request, replaceCrewScopes(requireAuth(request), request.params.crewId, parseInput(crewScopesSchema, request.body))))
 
   app.get('/org/secondments', async (request) => {
     const auth = requireAuth(request)
@@ -152,6 +195,18 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // ---------- companies ----------
+  app.post('/org/management-groups', async (request, reply) => {
+    const created = createManagementGroup(requireAuth(request), parseInput(managementGroupSchema, request.body))
+    return reply.status(201).send(success(request, created))
+  })
+  app.put<{ Params: IdParams }>('/org/management-groups/:id', async (request) =>
+    success(request, updateManagementGroup(requireAuth(request), request.params.id, parseInput(managementGroupUpdateSchema, request.body))))
+  app.delete<{ Params: IdParams }>('/org/management-groups/:id', async (request) => {
+    const { revision } = parseInput(revisionSchema, request.query)
+    updateManagementGroup(requireAuth(request), request.params.id, { revision, status: 'archived' })
+    return success(request, { id: request.params.id, archived: true })
+  })
+
   app.post('/org/companies', async (request, reply) => {
     const auth = requireAuth(request)
     const input = parseInput(companySchema, request.body)
@@ -194,6 +249,26 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // ---------- work areas ----------
+  app.post('/org/factories', async (request, reply) => {
+    const auth = requireAuth(request)
+    const input = parseInput(factorySchema, request.body)
+    const created = createFactory(auth, input)
+    return reply.status(201).send(success(request, created))
+  })
+
+  app.put<{ Params: IdParams }>('/org/factories/:id', async (request) => {
+    const auth = requireAuth(request)
+    const input = parseInput(factoryUpdateSchema, request.body)
+    return success(request, updateFactory(auth, request.params.id, input))
+  })
+
+  app.delete<{ Params: IdParams }>('/org/factories/:id', async (request) => {
+    const auth = requireAuth(request)
+    const { revision } = parseInput(revisionSchema, request.query)
+    archiveFactory(auth, request.params.id, revision)
+    return success(request, { id: request.params.id, archived: true })
+  })
+
   app.post('/org/work-areas', async (request, reply) => {
     const auth = requireAuth(request)
     const input = parseInput(workAreaSchema, request.body)
@@ -311,6 +386,14 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send(success(request, created))
   })
 
+  app.post<{ Params: CrewIdParams }>('/org/crews/:crewId/members/batch', async (request, reply) => {
+    const input = parseInput(crewMembersBatchSchema, request.body)
+    return reply.status(201).send(success(request, addCrewMembers(requireAuth(request), request.params.crewId, input.members)))
+  })
+
+  app.put<{ Params: IdParams }>('/org/crew-members/:id', async (request) =>
+    success(request, updateCrewMember(requireAuth(request), request.params.id, parseInput(crewMemberUpdateSchema, request.body))))
+
   app.put<{ Params: IdParams }>('/org/crew-members/:id/end', async (request) => {
     const auth = requireAuth(request)
     const input = parseInput(crewMemberEndSchema, request.body)
@@ -328,7 +411,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   app.put<{ Params: IdParams }>('/org/secondments/:id', async (request) => {
     const auth = requireAuth(request)
     const input = parseInput(
-      secondmentSchema.partial().extend({ revision: revisionSchema.shape.revision }),
+      secondmentUpdateSchema,
       request.body,
     )
     return success(request, updateSecondment(auth, request.params.id, input))

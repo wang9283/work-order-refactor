@@ -3,6 +3,11 @@ import type {
   ApiErrorBody,
   Capability,
   CurrentUser,
+  DemoAuthOptions,
+  DemoBaseOption,
+  DemoIdentityId,
+  DemoLoginResult,
+  DemoSessionResult,
   LoginInput,
   LoginResult,
   PageMeta,
@@ -10,7 +15,15 @@ import type {
   ScopeRef,
 } from '@contracts/index'
 
-const TOKEN_KEY = 'feed.group-work-order.token.v3'
+export type ClientSurface = 'admin' | 'mobile'
+
+const LEGACY_TOKEN_KEY = 'feed.group-work-order.token.v3'
+const TOKEN_KEYS: Record<ClientSurface, string> = {
+  admin: 'feed.group-work-order.token.v4.admin',
+  mobile: 'feed.group-work-order.token.v4.mobile',
+}
+
+let clientSurface: ClientSurface = window.location.pathname.includes('app.html') ? 'mobile' : 'admin'
 
 interface ApiEnvelope<T> {
   data: T
@@ -34,13 +47,35 @@ export class ApiRequestError extends Error {
   }
 }
 
+export function configureApiSurface(surface: ClientSurface): void {
+  clientSurface = surface
+  localStorage.removeItem(LEGACY_TOKEN_KEY)
+}
+
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+  return localStorage.getItem(TOKEN_KEYS[clientSurface])
 }
 
 export function setToken(token: string | null): void {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
+  if (token) localStorage.setItem(TOKEN_KEYS[clientSurface], token)
+  else localStorage.removeItem(TOKEN_KEYS[clientSurface])
+}
+
+let unauthorizedHandler: (() => void) | null = null
+let pendingMutations = 0
+const mutationIdleWaiters = new Set<() => void>()
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
+}
+
+export function hasPendingMutations(): boolean {
+  return pendingMutations > 0
+}
+
+export function waitForPendingMutations(): Promise<void> {
+  if (!hasPendingMutations()) return Promise.resolve()
+  return new Promise((resolve) => mutationIdleWaiters.add(resolve))
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<ApiEnvelope<T>> {
@@ -60,12 +95,29 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<ApiEnve
         requestId: response.headers.get('x-request-id') || '',
       }
     }
+    if (response.status === 401) {
+      setToken(null)
+      unauthorizedHandler?.()
+    }
     throw new ApiRequestError(response.status, body)
   }
   if (response.status === 204) {
     return { data: undefined as T, requestId: response.headers.get('x-request-id') || '' }
   }
   return (await response.json()) as ApiEnvelope<T>
+}
+
+async function mutate<T>(operation: () => Promise<T>): Promise<T> {
+  pendingMutations += 1
+  try {
+    return await operation()
+  } finally {
+    pendingMutations -= 1
+    if (!pendingMutations) {
+      for (const resolve of mutationIdleWaiters) resolve()
+      mutationIdleWaiters.clear()
+    }
+  }
 }
 
 function queryString(params: Record<string, string | number | boolean | null | undefined>): string {
@@ -79,6 +131,24 @@ function queryString(params: Record<string, string | number | boolean | null | u
 
 export const api = {
   auth: {
+    demoOptions: async (): Promise<DemoAuthOptions> => (
+      await request<DemoAuthOptions>('/auth/demo-options')
+    ).data,
+    demoLogin: async (identityId: DemoIdentityId, baseId?: string | null): Promise<DemoLoginResult> => (
+      await request<DemoLoginResult>('/auth/demo-login', {
+        method: 'POST',
+        body: JSON.stringify({ identityId, ...(baseId ? { baseId } : {}) }),
+      })
+    ).data,
+    demoSession: async (): Promise<DemoSessionResult> => (
+      await request<DemoSessionResult>('/auth/demo-session')
+    ).data,
+    demoBase: async (baseId: DemoBaseOption['id']): Promise<DemoSessionResult> => (
+      await request<DemoSessionResult>('/auth/demo-base', {
+        method: 'POST',
+        body: JSON.stringify({ baseId }),
+      })
+    ).data,
     login: async (input: LoginInput): Promise<LoginResult> => {
       const result = await request<LoginResult>('/auth/login', {
         method: 'POST',
@@ -104,20 +174,29 @@ export const api = {
     return { items: result.data, meta }
   },
   post: async <T>(path: string, body?: unknown): Promise<T> => (
-    await request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
+    await mutate(() => request<T>(path, {
+      method: 'POST',
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }))
   ).data,
   put: async <T>(path: string, body: unknown): Promise<T> => (
-    await request<T>(path, { method: 'PUT', body: JSON.stringify(body) })
+    await mutate(() => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }))
   ).data,
   patch: async <T>(path: string, body: unknown): Promise<T> => (
-    await request<T>(path, { method: 'PATCH', body: JSON.stringify(body) })
+    await mutate(() => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }))
   ).data,
   delete: async <T>(path: string): Promise<T> => (
-    await request<T>(path, { method: 'DELETE' })
+    await mutate(() => request<T>(path, { method: 'DELETE' }))
   ).data,
-  upload: async <T>(path: string, formData: FormData): Promise<T> => (
-    await request<T>(path, { method: 'POST', body: formData })
+  upload: async <T>(path: string, formData: FormData, headers: Record<string, string> = {}): Promise<T> => (
+    await mutate(() => request<T>(path, { method: 'POST', body: formData, headers }))
   ).data,
+}
+
+export function hasAnyCapability(user: CurrentUser | null, capabilities: Capability[]): boolean {
+  if (!user) return false
+  const capabilitySet = new Set(capabilities)
+  return user.grants.some((grant) => capabilitySet.has(grant.capability))
 }
 
 export function can(user: CurrentUser | null, capability: Capability, scope: ScopeRef): boolean {

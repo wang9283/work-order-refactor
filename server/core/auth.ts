@@ -4,6 +4,7 @@ import type {
   Capability,
   CapabilityGrant,
   CurrentUser,
+  DemoIdentityId,
   RoleAssignmentSummary,
   ScopeRef,
   ScopeType,
@@ -17,7 +18,10 @@ export interface AuthContext {
   username: string
   displayName: string
   personId: string | null
+  ipAddress: string
   tokenHash: string
+  demoIdentityId: DemoIdentityId | null
+  selectedBaseId: string | null
   grants: CapabilityGrant[]
 }
 
@@ -49,14 +53,27 @@ export function issueToken(): string {
   return crypto.randomUUID() + crypto.randomUUID().replaceAll('-', '')
 }
 
-export function createSession(accountId: string, ttlHours = 24): { token: string; expiresAt: string } {
+export function createSession(
+  accountId: string,
+  ttlHours = 24,
+  scope: { demoIdentityId?: DemoIdentityId | null; selectedBaseId?: string | null } = {},
+): { token: string; expiresAt: string } {
   const token = issueToken()
   const createdAt = new Date()
   const expiresAt = new Date(createdAt.getTime() + ttlHours * 60 * 60 * 1000)
   run(
-    `INSERT INTO sessions (token_hash, account_id, expires_at, created_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    [hashToken(token), accountId, expiresAt.toISOString(), createdAt.toISOString(), createdAt.toISOString()],
+    `INSERT INTO sessions
+      (token_hash, account_id, expires_at, created_at, last_seen_at, demo_identity_id, selected_base_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      hashToken(token),
+      accountId,
+      expiresAt.toISOString(),
+      createdAt.toISOString(),
+      createdAt.toISOString(),
+      scope.demoIdentityId ?? null,
+      scope.selectedBaseId ?? null,
+    ],
   )
   return { token, expiresAt: expiresAt.toISOString() }
 }
@@ -73,8 +90,13 @@ export function bearerToken(request: FastifyRequest): string | null {
 
 export function resolveAuth(token: string): AuthContext | null {
   const tokenHash = hashToken(token)
-  const row = one<AccountRow & { expires_at: string }>(
-    `SELECT a.id, a.username, a.display_name, a.person_id, a.status, s.expires_at
+  const row = one<AccountRow & {
+    expires_at: string
+    demo_identity_id: DemoIdentityId | null
+    selected_base_id: string | null
+  }>(
+    `SELECT a.id, a.username, a.display_name, a.person_id, a.status, s.expires_at,
+            s.demo_identity_id, s.selected_base_id
      FROM sessions s
      JOIN accounts a ON a.id = s.account_id
      WHERE s.token_hash = ?`,
@@ -96,47 +118,78 @@ export function resolveAuth(token: string): AuthContext | null {
     id: grant.scope_id,
   }))
 
+  // Explicit organization ancestry expands only downward, never into siblings.
+  for (const grant of [...grants]) {
+    if (grant.type !== 'factory') continue
+    const descendants = all<{factory_id:string}>(`WITH RECURSIVE branch AS (
+      SELECT id,factory_id FROM org_nodes WHERE factory_id=?
+      UNION ALL SELECT n.id,n.factory_id FROM org_nodes n JOIN branch b ON n.parent_id=b.id
+    ) SELECT factory_id FROM branch WHERE factory_id IS NOT NULL`,[grant.id])
+    for (const node of descendants) if (!grants.some(g => g.capability === grant.capability && g.type === 'factory' && g.id === node.factory_id)) grants.push({ ...grant, id: node.factory_id })
+  }
+
   run('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?', [new Date().toISOString(), tokenHash])
   return {
     accountId: row.id,
     username: row.username,
     displayName: row.display_name,
     personId: row.person_id,
+    ipAddress: '',
     tokenHash,
+    demoIdentityId: row.demo_identity_id,
+    selectedBaseId: row.selected_base_id,
     grants,
   }
 }
 
-function expandScope(type: ScopeType, id: string): Array<{ type: ScopeType; id: string }> {
-  if (type === 'group') return [{ type: 'group', id }]
-  if (type === 'company') {
-    return [
-      { type: 'company', id },
-      ...all<{ id: string }>('SELECT id FROM production_bases WHERE company_id = ?', [id]).map((row) => ({ type: 'base' as const, id: row.id })),
-    ]
-  }
-  if (type === 'base') {
-    return [
-      { type: 'base', id },
-      ...all<{ id: string }>('SELECT id FROM work_areas WHERE base_id = ?', [id]).map((row) => ({ type: 'work_area' as const, id: row.id })),
-    ]
-  }
-  return [{ type: 'work_area', id }]
+export function setSessionSelectedBase(tokenHash: string, baseId: string): void {
+  run('UPDATE sessions SET selected_base_id = ?, last_seen_at = ? WHERE token_hash = ?', [
+    baseId,
+    new Date().toISOString(),
+    tokenHash,
+  ])
 }
 
 export function hasGrant(auth: AuthContext, capability: Capability, scope: ScopeRef): boolean {
-  const requested = expandScope(scope.type, scope.id)
   return auth.grants.some((grant) => {
     if (grant.capability !== capability) return false
     if (grant.type === 'group') return true
-    if (grant.type === 'company') return requested.some((target) => target.type === 'company' && target.id === grant.id)
-    const target = requested.some((item) => item.type === grant.type && item.id === grant.id)
-    if (!target) return false
+
+    // A grant covers itself and descendants. Child grants never widen upward.
+    if (scope.type === 'company') return grant.type === 'company' && grant.id === scope.id
     if (grant.type === 'base') {
-      const baseCompany = one<{ company_id: string }>('SELECT company_id FROM production_bases WHERE id = ?', [grant.id])
-      return requested.some((item) => item.type === 'base' && (!baseCompany || item.id === grant.id))
+      if (scope.type === 'base') return grant.id === scope.id
+      if (scope.type === 'factory') {
+        return one<{ base_id: string }>('SELECT base_id FROM factories WHERE id = ?', [scope.id])?.base_id === grant.id
+      }
+      if (scope.type === 'work_area') {
+        return one<{ base_id: string }>('SELECT base_id FROM work_areas WHERE id = ?', [scope.id])?.base_id === grant.id
+      }
+      return false
     }
-    return true
+    if (grant.type === 'company') {
+      if (scope.type === 'base') {
+        return one<{ company_id: string }>('SELECT company_id FROM production_bases WHERE id = ?', [scope.id])?.company_id === grant.id
+      }
+      if (scope.type === 'factory') {
+        return one<{ company_id: string }>('SELECT company_id FROM factories WHERE id = ?', [scope.id])?.company_id === grant.id
+      }
+      if (scope.type === 'work_area') {
+        return one<{ company_id: string }>(
+          `SELECT b.company_id FROM work_areas wa
+           JOIN production_bases b ON b.id = wa.base_id
+           WHERE wa.id = ?`,
+          [scope.id],
+        )?.company_id === grant.id
+      }
+      return false
+    }
+    if (grant.type === 'factory') {
+      if (scope.type === 'factory') return grant.id === scope.id
+      if (scope.type === 'work_area') return one<{ factory_id: string | null }>('SELECT factory_id FROM work_areas WHERE id = ?', [scope.id])?.factory_id === grant.id
+      return false
+    }
+    return scope.type === 'work_area' && grant.type === 'work_area' && grant.id === scope.id
   })
 }
 

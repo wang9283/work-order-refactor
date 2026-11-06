@@ -9,6 +9,8 @@ export const pageQuerySchema = z.object({
   status: z.string().trim().optional(),
   companyId: z.string().trim().optional(),
   siteId: z.string().trim().optional(),
+  factoryId: z.string().trim().optional(),
+  crewId: z.string().trim().optional(),
   workAreaId: z.string().trim().optional(),
   sortBy: z.string().trim().optional(),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
@@ -31,7 +33,7 @@ export interface PagedResult<T> {
 export const activeStatuses = ['active', 'inactive', 'archived'] as const
 export type ActiveStatus = (typeof activeStatuses)[number]
 
-export const scopeTypes = ['group', 'company', 'base', 'work_area'] as const
+export const scopeTypes = ['group', 'company', 'base', 'factory', 'work_area'] as const
 export type ScopeType = (typeof scopeTypes)[number]
 
 export interface ScopeRef {

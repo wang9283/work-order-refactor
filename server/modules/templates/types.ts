@@ -13,6 +13,7 @@ export interface FormTemplateRow {
   owner_type: 'group' | 'company'
   owner_id: string
   source: 'native' | 'excel'
+  locked: number
   current_published_version_id: string | null
   revision: number
   created_at: string
@@ -45,7 +46,25 @@ export interface TicketTypeRow {
   owner_id: string
   origin: 'group_standard' | 'local'
   status: 'draft' | 'published' | 'retired' | 'archived'
+  locked: number
   current_version_id: string | null
+  revision: number
+  created_at: string
+  created_by: string | null
+  updated_at: string
+  updated_by: string | null
+  system_managed: number
+  business_kind: 'production' | 'loading' | null
+}
+
+export interface TicketCategoryRow {
+  id: string
+  code: string
+  name: string
+  owner_type: 'group' | 'company'
+  owner_id: string
+  status: 'active' | 'inactive' | 'archived'
+  locked: number
   revision: number
   created_at: string
   created_by: string | null
@@ -71,7 +90,9 @@ export interface TicketTypeVersionRow {
 export interface WorkProfileRow {
   id: string
   ticket_type_version_id: string
+  name: string
   site_id: string
+  factory_id: string | null
   work_area_id: string | null
   production_line_id: string | null
   crew_id: string | null
@@ -106,6 +127,7 @@ export function mapFormTemplate(row: FormTemplateRow): FormTemplate {
     ownerType: row.owner_type,
     ownerId: row.owner_id,
     source: row.source,
+    locked: row.locked === 1,
     currentPublishedVersionId: row.current_published_version_id,
     revision: row.revision,
     createdAt: row.created_at,
@@ -142,7 +164,27 @@ export function mapTicketType(row: TicketTypeRow): TicketType {
     ownerId: row.owner_id,
     origin: row.origin,
     status: row.status,
+    locked: row.locked === 1,
     currentVersionId: row.current_version_id,
+    systemManaged: row.system_managed === 1,
+    businessKind: row.business_kind ?? null,
+    revision: row.revision,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  }
+}
+
+export function mapTicketCategory(row: TicketCategoryRow) {
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    ownerType: row.owner_type,
+    ownerId: row.owner_id,
+    status: row.status,
+    locked: row.locked === 1,
     revision: row.revision,
     createdAt: row.created_at,
     createdBy: row.created_by,
@@ -155,7 +197,9 @@ export function mapWorkProfile(row: WorkProfileRow): WorkProfile {
   return {
     id: row.id,
     ticketTypeVersionId: row.ticket_type_version_id,
+    name: row.name,
     siteId: row.site_id,
+    factoryId: row.factory_id,
     workAreaId: row.work_area_id,
     productionLineId: row.production_line_id,
     crewId: row.crew_id,

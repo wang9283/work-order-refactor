@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 
 let database: DatabaseSync | null = null
+let transactionDepth = 0
+let savepointSequence = 0
 
 function configuredPath(): string {
   const raw = process.env.DATABASE_PATH || './data/feed.db'
@@ -43,14 +45,24 @@ export function run(sql: string, params: SQLInputValue[] = []): { changes: numbe
 
 export function transaction<T>(fn: () => T): T {
   const db = openDatabase()
-  db.exec('BEGIN IMMEDIATE')
+  const nested = transactionDepth > 0
+  const savepoint = `nested_${++savepointSequence}`
+  db.exec(nested ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE')
+  transactionDepth += 1
   try {
     const result = fn()
-    db.exec('COMMIT')
+    db.exec(nested ? `RELEASE SAVEPOINT ${savepoint}` : 'COMMIT')
     return result
   } catch (error) {
-    db.exec('ROLLBACK')
+    if (nested) {
+      db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+      db.exec(`RELEASE SAVEPOINT ${savepoint}`)
+    } else {
+      db.exec('ROLLBACK')
+    }
     throw error
+  } finally {
+    transactionDepth -= 1
   }
 }
 

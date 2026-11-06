@@ -9,11 +9,12 @@ export const formTemplateCreateSchema = z.object({
   ownerId: z.string().min(1),
   source: z.enum(['native', 'excel']).default('native'),
   schema: formVersionSchema,
+  locked: z.boolean().default(false),
 })
 
 export const formTemplateQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  pageSize: z.coerce.number().int().min(1).max(200).default(20),
   q: z.string().trim().optional(),
   ownerType: z.enum(['group', 'company']).optional(),
   ownerId: z.string().trim().optional(),
@@ -23,6 +24,15 @@ export const formTemplateQuerySchema = z.object({
 export const formVersionCreateSchema = z.object({
   fromVersionId: z.string().min(1).optional(),
   schema: formVersionSchema.optional(),
+})
+
+export const formCopySchema = z.object({
+  code: z.string().trim().min(2).max(40),
+  name: z.string().trim().min(2).max(100),
+  ownerType: z.enum(['group', 'company']),
+  ownerId: z.string().min(1),
+  locked: z.boolean().default(false),
+  fromVersionId: z.string().min(1).optional(),
 })
 
 export const formVersionUpdateSchema = z.object({
@@ -39,6 +49,7 @@ export const ticketCategoryCreateSchema = z.object({
   name: z.string().trim().min(1).max(80),
   ownerType: z.enum(['group', 'company']),
   ownerId: z.string().min(1),
+  locked: z.boolean().default(false),
 })
 
 export const ticketTypeCreateSchema = z.object({
@@ -50,11 +61,12 @@ export const ticketTypeCreateSchema = z.object({
   formTemplateId: z.string().min(1),
   formVersionId: z.string().min(1),
   workProfiles: z.array(workProfileSchema.omit({ id: true })).default([]),
+  locked: z.boolean().default(false),
 })
 
 export const ticketTypeQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  pageSize: z.coerce.number().int().min(1).max(200).default(20),
   q: z.string().trim().optional(),
   ownerType: z.enum(['group', 'company']).optional(),
   ownerId: z.string().trim().optional(),
@@ -78,5 +90,6 @@ export const excelCommitSchema = z.object({
   ownerType: z.enum(['group', 'company']),
   ownerId: z.string().min(1),
   mappings: z.record(z.string(), z.string().nullable()),
+  locked: z.boolean().default(false),
   revision: z.number().int().positive().optional(),
 })

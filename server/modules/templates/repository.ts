@@ -2,6 +2,7 @@ import type { SQLInputValue } from 'node:sqlite'
 import type {
   FormVersionSchema,
   PagedResult,
+  TicketCatalogItem,
   WorkProfile,
 } from '../../../packages/contracts/src'
 import { newId } from '../../core/ids'
@@ -9,11 +10,19 @@ import { all, one, run, transaction } from '../../db/database'
 import type {
   FormTemplateRow,
   FormVersionRow,
+  TicketCategoryRow,
   TicketTypeRow,
   TicketTypeVersionRow,
   WorkProfileRow,
 } from './types'
-import { mapFormTemplate, mapFormVersion, mapTicketType, mapTicketTypeVersion, mapWorkProfile } from './types'
+import {
+  mapFormTemplate,
+  mapFormVersion,
+  mapTicketCategory,
+  mapTicketType,
+  mapTicketTypeVersion,
+  mapWorkProfile,
+} from './types'
 
 const now = () => new Date().toISOString()
 
@@ -49,7 +58,7 @@ function pageMeta<T>(items: T[], total: number, paging: Paging): PagedResult<T> 
 }
 
 export function listForms(filter: FormListFilter): PagedResult<ReturnType<typeof mapFormTemplate>> {
-  const clauses: string[] = []
+  const clauses: string[] = ['t.system_managed = 0']
   const params: SQLInputValue[] = []
   if (filter.q) {
     clauses.push('(t.code LIKE ? OR t.name LIKE ?)')
@@ -78,7 +87,7 @@ export function listForms(filter: FormListFilter): PagedResult<ReturnType<typeof
 }
 
 export function getForm(id: string): FormTemplateRow | undefined {
-  return one<FormTemplateRow>('SELECT * FROM form_templates WHERE id = ?', [id])
+  return one<FormTemplateRow>('SELECT * FROM form_templates WHERE id = ? AND system_managed = 0', [id])
 }
 
 export function getFormVersion(id: string): FormVersionRow | undefined {
@@ -108,6 +117,7 @@ export function createForm(input: {
   ownerId: string
   source: 'native' | 'excel'
   schema: FormVersionSchema
+  locked?: boolean
   actorId: string | null
 }): { formId: string; versionId: string } {
   return transaction(() => {
@@ -116,10 +126,11 @@ export function createForm(input: {
     const versionId = newId('formver')
     run(
       `INSERT INTO form_templates
-       (id, code, name, owner_type, owner_id, source, current_published_version_id, revision,
+       (id, code, name, owner_type, owner_id, source, locked, current_published_version_id, revision,
         created_at, created_by, updated_at, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)`,
-      [formId, input.code, input.name, input.ownerType, input.ownerId, input.source, timestamp,
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?)`,
+      [formId, input.code, input.name, input.ownerType, input.ownerId, input.source,
+        Number(Boolean(input.locked)), timestamp,
         input.actorId, timestamp, input.actorId],
     )
     run(
@@ -218,7 +229,7 @@ export function publishFormVersion(templateId: string, versionId: string, revisi
 }
 
 export function listTicketTypes(filter: TicketTypeListFilter) {
-  const clauses: string[] = []
+  const clauses: string[] = ['system_managed = 0']
   const params: SQLInputValue[] = []
   if (filter.q) {
     clauses.push('(code LIKE ? OR name LIKE ?)')
@@ -246,7 +257,7 @@ export function listTicketTypes(filter: TicketTypeListFilter) {
 }
 
 export function getTicketType(id: string): TicketTypeRow | undefined {
-  return one<TicketTypeRow>('SELECT * FROM ticket_types WHERE id = ?', [id])
+  return one<TicketTypeRow>('SELECT * FROM ticket_types WHERE id = ? AND system_managed = 0', [id])
 }
 
 export function getTicketTypeVersion(id: string): TicketTypeVersionRow | undefined {
@@ -283,12 +294,12 @@ function insertWorkProfiles(versionId: string, profiles: WorkProfileInput[], sta
   for (const profile of profiles) {
     run(
       `INSERT INTO work_profiles
-       (id, ticket_type_version_id, site_id, work_area_id, production_line_id, crew_id,
+       (id, ticket_type_version_id, name, site_id, factory_id, work_area_id, production_line_id, crew_id,
         shift_template_id, generation_mode, handover_grouping, handover_required,
         time_window_start, time_window_end, early_start_minutes, late_end_minutes,
         assignment_mode, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newId('workprofile'), versionId, profile.siteId, profile.workAreaId,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId('workprofile'), versionId, profile.name, profile.siteId, profile.factoryId, profile.workAreaId,
         profile.productionLineId, profile.crewId, profile.shiftTemplateId,
         profile.generationMode, profile.handoverGrouping, profile.handoverRequired ? 1 : 0,
         profile.timeWindowStart, profile.timeWindowEnd, profile.earlyStartMinutes,
@@ -306,28 +317,71 @@ export function createTicketCategory(input: {
   name: string
   ownerType: 'group' | 'company'
   ownerId: string
+  locked?: boolean
   actorId: string | null
 }) {
   const id = newId('cat')
   const timestamp = now()
   run(
     `INSERT INTO ticket_categories
-     (id, code, name, owner_type, owner_id, status, revision, created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)`,
-    [id, input.code, input.name, input.ownerType, input.ownerId, timestamp, input.actorId, timestamp, input.actorId],
+     (id, code, name, owner_type, owner_id, status, locked, revision, created_at, created_by, updated_at, updated_by)
+     VALUES (?, ?, ?, ?, ?, 'active', ?, 1, ?, ?, ?, ?)`,
+    [id, input.code, input.name, input.ownerType, input.ownerId, Number(Boolean(input.locked)),
+      timestamp, input.actorId, timestamp, input.actorId],
   )
   return id
 }
 
 export function getTicketCategory(id: string) {
-  return one<{
-    id: string
-    code: string
-    name: string
-    owner_type: 'group' | 'company'
-    owner_id: string
-    status: string
-  }>('SELECT id, code, name, owner_type, owner_id, status FROM ticket_categories WHERE id = ?', [id])
+  return one<TicketCategoryRow>('SELECT * FROM ticket_categories WHERE id = ?', [id])
+}
+
+export function listTicketCategories() {
+  return all<TicketCategoryRow>(
+    `SELECT * FROM ticket_categories
+     ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'inactive' THEN 1 ELSE 2 END, name, code`,
+  ).map(mapTicketCategory)
+}
+
+export function listAllTicketTypes() {
+  return all<TicketTypeRow>(
+    `SELECT * FROM ticket_types
+     ORDER BY CASE status WHEN 'published' THEN 0 WHEN 'draft' THEN 1 WHEN 'retired' THEN 2 ELSE 3 END, name, code`,
+  ).map(mapTicketType)
+}
+
+export function listTicketCatalog(
+  visibleType: (type: ReturnType<typeof mapTicketType>) => boolean,
+  visibleCategory: (category: ReturnType<typeof mapTicketCategory>) => boolean = () => true,
+) {
+  const categories = listTicketCategories().filter(visibleCategory)
+  const categoryById = new Map(categories.map((category) => [category.id, category]))
+  const types: TicketCatalogItem[] = listAllTicketTypes()
+    .filter(visibleType)
+    .filter((type) => categoryById.has(type.categoryId))
+    .map((type) => {
+      const category = categoryById.get(type.categoryId)!
+      return {
+        ...type,
+        categoryCode: category.code,
+        categoryName: category.name,
+        sanitationKind: type.code === 'VEHICLE_SANITATION'
+          ? 'vehicle'
+          : type.code === 'FACILITY_SANITATION' ? 'facility' : null,
+      }
+    })
+  const typesByCategory = new Map<string, TicketCatalogItem[]>()
+  for (const type of types) {
+    const bucket = typesByCategory.get(type.categoryId) ?? []
+    bucket.push(type)
+    typesByCategory.set(type.categoryId, bucket)
+  }
+  return {
+    groups: categories
+      .filter((category) => typesByCategory.has(category.id) || category.status === 'active')
+      .map((category) => ({ ...category, types: typesByCategory.get(category.id) ?? [] })),
+    types,
+  }
 }
 
 export function createTicketType(input: {
@@ -339,6 +393,7 @@ export function createTicketType(input: {
   formTemplateId: string
   formVersionId: string
   workProfiles: WorkProfileInput[]
+  locked?: boolean
   actorId: string | null
 }): { typeId: string; versionId: string } {
   return transaction(() => {
@@ -347,11 +402,12 @@ export function createTicketType(input: {
     const versionId = newId('tickettypever')
     run(
       `INSERT INTO ticket_types
-       (id, code, name, category_id, owner_type, owner_id, origin, status,
+       (id, code, name, category_id, owner_type, owner_id, origin, status, locked,
         current_version_id, revision, created_at, created_by, updated_at, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', NULL, 1, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, NULL, 1, ?, ?, ?, ?)`,
       [typeId, input.code, input.name, input.categoryId, input.ownerType, input.ownerId,
         input.ownerType === 'group' ? 'group_standard' : 'local',
+        Number(Boolean(input.locked)),
         timestamp, input.actorId, timestamp, input.actorId],
     )
     run(

@@ -1,14 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApartmentOutlined,
-  BranchesOutlined,
-  DeleteOutlined,
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
-  SafetyCertificateOutlined,
-  TeamOutlined,
-  UserSwitchOutlined,
 } from '@ant-design/icons'
 import {
   App,
@@ -35,28 +30,35 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import type {
   Company,
-  Crew,
-  CrewMembership,
+  Factory,
+  ManagementGroup,
   OrgReferenceData,
   Person,
+  PersonCrewHistory,
   ProductionBase,
-  ProductionLine,
   Qualification,
   Secondment,
-  WorkArea,
 } from '@contracts/index'
 import { api, can, errorMessage } from '@next/shared/api'
 import { useAuth } from '@next/shared/auth'
+import { crewRoleLabels } from '@next/shared/defaults'
 import { formatDate, formatDateTime } from '@next/shared/format'
 import { ErrorBlock, LoadingBlock, PageHeader } from '@next/shared/ui'
+import { useAntFormUnsavedChanges } from '@next/shared/unsaved-changes'
 
 type Section = 'structure' | 'people' | 'secondment' | 'access'
-type Entity = 'base' | 'area' | 'line' | 'crew' | 'person' | 'secondment' | 'qualification'
+const sectionHash: Record<Section, string> = {
+  structure: '#/org',
+  people: '#/people',
+  secondment: '#/people',
+  access: '#/access',
+}
+type Entity = 'company' | 'managementGroup' | 'base' | 'factory' | 'crew' | 'person' | 'secondment' | 'qualification'
 
 interface AccessOptions {
   accounts: Array<{ id: string; username: string; displayName: string; personId: string | null }>
   roles: Array<{ id: string; code: string; name: string; builtIn: boolean }>
-  scopes: Array<{ label: string; type: 'group' | 'company' | 'base' | 'work_area'; id: string }>
+  scopes: Array<{ label: string; type: 'group' | 'company' | 'base' | 'factory' | 'work_area'; id: string }>
 }
 
 interface AccessAssignment {
@@ -73,7 +75,15 @@ interface AccessAssignment {
 const statusColor: Record<string, string> = { active: 'green', inactive: 'gold', archived: 'default' }
 const statusLabel: Record<string, string> = { active: '启用', inactive: '停用', archived: '已归档' }
 const secondmentLabel: Record<string, string> = {
-  planned: '待生效', active: '执行中', completed: '已完成', cancelled: '已取消',
+  planned: '待生效', active: '执行中', expired: '已到期', completed: '已完成', cancelled: '已取消',
+}
+
+function effectiveSecondmentStatus(secondment: Secondment): string {
+  if (secondment.status === 'completed' || secondment.status === 'cancelled') return secondment.status
+  const today = new Date().toLocaleDateString('sv-SE')
+  if (secondment.startDate > today) return 'planned'
+  if (secondment.endDate < today) return 'expired'
+  return 'active'
 }
 
 function StatusTag({ status }: { status: string }) {
@@ -86,13 +96,15 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
   const [section, setSection] = useState<Section>(initialSection)
   const [tree, setTree] = useState<OrgReferenceData | null>(null)
   const [people, setPeople] = useState<Person[]>([])
+  const [personSearch, setPersonSearch] = useState('')
+  const [personFactory, setPersonFactory] = useState<string | undefined>()
+  const [personCrew, setPersonCrew] = useState<string | undefined>()
   const [secondments, setSecondments] = useState<Secondment[]>([])
-  const [members, setMembers] = useState<CrewMembership[]>([])
-  const [selectedCrew, setSelectedCrew] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [drawer, setDrawer] = useState<{ entity: Entity; record?: Record<string, unknown> } | null>(null)
   const [form] = Form.useForm()
+  useAntFormUnsavedChanges(form, Boolean(drawer), '组织主数据')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -106,7 +118,6 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
       setTree(nextTree)
       setPeople(nextPeople.items)
       setSecondments(nextSecondments.items)
-      setSelectedCrew((current) => current || nextTree.crews[0]?.id || '')
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -117,11 +128,8 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
   useEffect(() => { void load() }, [load])
 
   useEffect(() => {
-    if (!selectedCrew) return
-    api.get<CrewMembership[]>(`/org/crews/${selectedCrew}/members`)
-      .then(setMembers)
-      .catch((reason) => message.error(errorMessage(reason)))
-  }, [selectedCrew, message])
+    setSection(initialSection)
+  }, [initialSection])
 
   const baseName = useMemo(
     () => new Map((tree?.bases || []).map((item) => [item.id, item.name])),
@@ -148,9 +156,10 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
     const { entity, record } = drawer
     const id = record?.id as string | undefined
     const pathMap: Record<Entity, string> = {
+      company: '/org/companies',
+      managementGroup: '/org/management-groups',
       base: '/org/bases',
-      area: '/org/work-areas',
-      line: '/org/production-lines',
+      factory: '/org/factories',
       crew: '/org/crews',
       person: '/org/people',
       secondment: '/org/secondments',
@@ -167,115 +176,64 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
     }
   }
 
-  const archive = async (entity: Entity, record: Record<string, unknown>) => {
-    const pathMap: Record<Entity, string> = {
-      base: '/org/bases',
-      area: '/org/work-areas',
-      line: '/org/production-lines',
-      crew: '/org/crews',
-      person: '/org/people',
-      secondment: '/org/secondments',
-      qualification: '/org/qualifications',
-    }
-    try {
-      await api.delete(`${pathMap[entity]}/${record.id}?revision=${record.revision}`)
-      message.success(entity === 'secondment' ? '借调已取消' : '已归档')
-      await load()
-    } catch (reason) {
-      message.error(errorMessage(reason))
-    }
-  }
-
   if (loading) return <LoadingBlock rows={7} />
   if (error) return <ErrorBlock message={error} onRetry={() => void load()} />
   if (!tree) return null
 
-  const canAtBase = (capability: 'org.manage' | 'person.manage' | 'secondment.manage', baseId: string) => {
+  const canAtBase = (
+    capability: 'org.manage' | 'crew.manage' | 'person.manage' | 'secondment.manage',
+    baseId: string,
+    factoryId?: string | null,
+  ) => {
     const base = tree.bases.find((item) => item.id === baseId)
     return Boolean(user?.grants.some((grant) => {
       if (grant.capability !== capability) return false
       if (grant.type === 'group') return true
       if (grant.type === 'base') return grant.id === baseId
       if (grant.type === 'company') return Boolean(base && grant.id === base.companyId)
-      const area = tree.workAreas.find((item) => item.id === grant.id)
-      return area?.baseId === baseId
+      if (grant.type === 'factory') return grant.id === factoryId
+      return false
     }))
   }
   const canManageOrg = can(user, 'org.manage', { type: 'group', id: 'group' })
     || tree.bases.some((base) => canAtBase('org.manage', base.id))
-  const canManagePeople = people.some((person) => canAtBase('person.manage', person.homeBaseId))
+  const canManageCrews = can(user, 'crew.manage', { type: 'group', id: 'group' })
+    || tree.crews.some((crew) => canAtBase('crew.manage', crew.baseId, crew.factoryId))
+  const canManagePeople = people.some((person) => canAtBase('person.manage', person.homeBaseId, person.factoryId))
   const canManageSecondment = user?.grants.some((grant) => grant.capability === 'secondment.manage') || false
   const isGroupAdmin = user?.grants.some((grant) => grant.capability === 'access.manage' && grant.type === 'group') || false
+  const isGroupOrgAdmin = user?.grants.some((grant) => grant.capability === 'org.manage' && grant.type === 'group') || false
 
   const treeData = [{
     key: 'group-root',
-    title: <b>东方希望集团</b>,
+    title: <b>饲料总部</b>,
     icon: <ApartmentOutlined />,
-    children: tree.companies.filter((company) => !company.isGroup).map((company) => ({
-      key: company.id,
-      title: company.shortName || company.name,
-      children: tree.bases.filter((base) => base.companyId === company.id).map((base) => ({
-        key: base.id,
-        title: base.name,
-        children: tree.workAreas.filter((area) => area.baseId === base.id).map((area) => ({
-          key: area.id,
-          title: area.name,
-          children: [
-            ...tree.productionLines.filter((line) => line.workAreaId === area.id).map((line) => ({
-              key: line.id,
-              title: `产线 · ${line.name}`,
-            })),
-            ...tree.crews.filter((crew) => crew.workAreaId === area.id).map((crew) => ({
-              key: crew.id,
-              title: `班组 · ${crew.name}`,
-            })),
-          ],
-        })),
-      })),
-    })),
+    children: [
+      ...tree.managementGroups.map((group) => ({ key: group.id, title: group.name,
+        children: tree.factories.filter((factory) => factory.managementGroupId === group.id)
+          .map((factory) => ({ key: factory.id, title: factory.name, isLeaf: true })) })),
+      ...(tree.factories.some((factory) => !factory.managementGroupId) ? [{ key: 'unclassified', title: '待分类工厂',
+        children: tree.factories.filter((factory) => !factory.managementGroupId).map((factory) => ({ key: factory.id, title: factory.name, isLeaf: true })) }] : []),
+    ],
   }]
 
-  const areaColumns: ColumnsType<WorkArea> = [
+  const factoryColumns: ColumnsType<Factory> = [
     { title: '编码', dataIndex: 'code', width: 120 },
-    { title: '工区', dataIndex: 'name', render: (value, row) => <Space direction="vertical" size={0}><b>{value}</b><small>{baseName.get(row.baseId)}</small></Space> },
-    { title: '上级工区', dataIndex: 'parentId', render: (value: string | null) => value ? tree.workAreas.find((item) => item.id === value)?.name : '基地直属' },
+    {
+      title: '饲料厂',
+      dataIndex: 'name',
+      render: (value: string, row) => <Space direction="vertical" size={0}>
+        <b>{value}</b>
+        <small>{baseName.get(row.baseId)} · {companyName.get(row.companyId)}</small>
+      </Space>,
+    },
+    { title: '生产班', render: (_, row) => tree.crews.filter((crew) => crew.factoryId === row.id).length },
+    { title: '人员', render: (_, row) => people.filter((person) => person.factoryId === row.id).length },
     { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag status={value} /> },
     {
       title: '操作', width: 150,
       render: (_, row) => <Space>
-        {canAtBase('org.manage', row.baseId) && <Button type="link" icon={<EditOutlined />} onClick={() => open('area', row as unknown as Record<string, unknown>)}>编辑</Button>}
-        {canAtBase('org.manage', row.baseId) && <Popconfirm title="归档此工区？" onConfirm={() => void archive('area', row as unknown as Record<string, unknown>)}><Button type="link" danger icon={<DeleteOutlined />}>归档</Button></Popconfirm>}
-      </Space>,
-    },
-  ]
-
-  const lineColumns: ColumnsType<ProductionLine> = [
-    { title: '编码', dataIndex: 'code', width: 120 },
-    { title: '产线', dataIndex: 'name' },
-    { title: '工区', dataIndex: 'workAreaId', render: (value: string) => tree.workAreas.find((item) => item.id === value)?.name || '—' },
-    { title: '基地', dataIndex: 'baseId', render: (value: string) => baseName.get(value) || '—' },
-    { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag status={value} /> },
-    {
-      title: '操作', width: 150,
-      render: (_, row) => <Space>
-        {canAtBase('org.manage', row.baseId) && <Button type="link" icon={<EditOutlined />} onClick={() => open('line', row as unknown as Record<string, unknown>)}>编辑</Button>}
-        {canAtBase('org.manage', row.baseId) && <Popconfirm title="归档此产线？" onConfirm={() => void archive('line', row as unknown as Record<string, unknown>)}><Button type="link" danger>归档</Button></Popconfirm>}
-      </Space>,
-    },
-  ]
-
-  const crewColumns: ColumnsType<Crew> = [
-    { title: '编码', dataIndex: 'code', width: 120 },
-    { title: '班组', dataIndex: 'name' },
-    { title: '工区', dataIndex: 'workAreaId', render: (value: string) => tree.workAreas.find((item) => item.id === value)?.name || '—' },
-    { title: '班组长', dataIndex: 'leaderPersonId', render: (value: string | null) => value ? personName.get(value) : '未指定' },
-    { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag status={value} /> },
-    {
-      title: '操作', width: 210,
-      render: (_, row) => <Space>
-        <Button type="link" icon={<TeamOutlined />} onClick={() => setSelectedCrew(row.id)}>成员</Button>
-        {canAtBase('org.manage', row.baseId) && <Button type="link" icon={<EditOutlined />} onClick={() => open('crew', row as unknown as Record<string, unknown>)}>编辑</Button>}
-        {canAtBase('org.manage', row.baseId) && <Popconfirm title="归档此班组？" onConfirm={() => void archive('crew', row as unknown as Record<string, unknown>)}><Button type="link" danger>归档</Button></Popconfirm>}
+        {canAtBase('org.manage', row.baseId, row.id) && <Button type="link" icon={<EditOutlined />} onClick={() => open('factory', row as unknown as Record<string, unknown>)}>编辑</Button>}
       </Space>,
     },
   ]
@@ -285,6 +243,22 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
     { title: '姓名', dataIndex: 'name', render: (value, row) => <Space direction="vertical" size={0}><b>{value}</b><small>{row.mobile || '无手机号'}</small></Space> },
     { title: '所属公司', dataIndex: 'homeCompanyId', render: (value: string) => companyName.get(value) || '—' },
     { title: '归属基地', dataIndex: 'homeBaseId', render: (value: string) => baseName.get(value) || '—' },
+    { title: '归属饲料厂', dataIndex: 'factoryId', render: (value: string | null) => tree.factories.find((item) => item.id === value)?.name || '—' },
+    {
+      title: '当前班组', dataIndex: 'crew',
+      render: (value: Person['crew']) => value
+        ? <Space direction="vertical" size={0}>
+            <b>{value.crewName}</b>
+            <small>{formatDate(value.validFrom)} 起{value.validTo ? ` 至 ${formatDate(value.validTo)}` : ' 长期'}</small>
+          </Space>
+        : <Typography.Text type="secondary">未分配</Typography.Text>,
+    },
+    {
+      title: '班组岗位', dataIndex: 'crew', key: 'crewRole', width: 96,
+      render: (value: Person['crew']) => value
+        ? <Tag>{crewRoleLabels[value.role] || value.role}</Tag>
+        : <Typography.Text type="secondary">未分配</Typography.Text>,
+    },
     {
       title: '作业资格', dataIndex: 'qualifications',
       render: (value: Person['qualifications']) => value.length
@@ -295,8 +269,7 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
     {
       title: '操作', width: 150,
       render: (_, row) => <Space>
-        {canAtBase('person.manage', row.homeBaseId) && <Button type="link" icon={<EditOutlined />} onClick={() => open('person', row as unknown as Record<string, unknown>)}>编辑</Button>}
-        {canAtBase('person.manage', row.homeBaseId) && <Popconfirm title="归档此人员？" onConfirm={() => void archive('person', row as unknown as Record<string, unknown>)}><Button type="link" danger>归档</Button></Popconfirm>}
+        {canAtBase('person.manage', row.homeBaseId, row.factoryId) && <Button type="link" icon={<EditOutlined />} onClick={() => open('person', row as unknown as Record<string, unknown>)}>编辑</Button>}
       </Space>,
     },
   ]
@@ -307,17 +280,24 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
       title: '借出 → 借入',
       render: (_, row) => <Space direction="vertical" size={0}>
         <span>{companyName.get(row.fromCompanyId)} / {baseName.get(row.fromBaseId)}</span>
-        <b>{companyName.get(row.toCompanyId)} / {baseName.get(row.toBaseId)}</b>
+        <b>{companyName.get(row.toCompanyId)} / {baseName.get(row.toBaseId)} / {tree.factories.find((factory) => factory.id === row.toFactoryId)?.name || '接收工厂待确认'}</b>
       </Space>,
     },
     { title: '有效期', render: (_, row) => `${formatDate(row.startDate)} 至 ${formatDate(row.endDate)}` },
     { title: '事由', dataIndex: 'purpose', ellipsis: true },
-    { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <Tag color={value === 'active' ? 'green' : value === 'planned' ? 'gold' : 'default'}>{secondmentLabel[value] || value}</Tag> },
+    {
+      title: '状态',
+      width: 100,
+      render: (_, row) => {
+        const value = effectiveSecondmentStatus(row)
+        const color = value === 'active' ? 'green' : value === 'planned' || value === 'expired' ? 'gold' : 'default'
+        return <Tag color={color}>{secondmentLabel[value] || value}</Tag>
+      },
+    },
     {
       title: '操作', width: 150,
       render: (_, row) => <Space>
         {canManageSecondment && <Button type="link" icon={<EditOutlined />} onClick={() => open('secondment', row as unknown as Record<string, unknown>)}>编辑</Button>}
-        {canManageSecondment && row.status !== 'cancelled' && row.status !== 'completed' && <Popconfirm title="取消此借调？" onConfirm={() => void archive('secondment', row as unknown as Record<string, unknown>)}><Button type="link" danger>取消</Button></Popconfirm>}
       </Space>,
     },
   ]
@@ -326,33 +306,36 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
     <div>
       <PageHeader
         eyebrow="GROUP · ORGANIZATION CONTROL"
-        title="组织、人员与授权"
-        description="公司负责工资主体，基地、工区、产线和班组承接实际作业；借调同时保留来源归属与接收归属。"
+        title={({ structure: '组织管理', people: '人员管理', secondment: '借调管理', access: '角色与数据范围' })[section]}
+        description="维护组织、人员和授权；作业位置与班组通过独立入口管理。"
         actions={<Button icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>}
       />
-      <Segmented
-        block
-        value={section}
-        onChange={(value) => setSection(value as Section)}
-        options={[
-          { label: '组织与作业结构', value: 'structure', icon: <ApartmentOutlined /> },
-          { label: '人员与资格', value: 'people', icon: <TeamOutlined /> },
-          { label: '借调管理', value: 'secondment', icon: <UserSwitchOutlined /> },
-          { label: '角色与数据范围', value: 'access', icon: <SafetyCertificateOutlined /> },
-        ]}
-        style={{ marginBottom: 20 }}
-      />
-
       {section === 'structure' && (
         <Row gutter={[18, 18]}>
           <Col xs={24} xl={6}>
-            <Card className="surface-card org-tree-card" title="集团组织树" extra={<Tag>{tree.bases.length} 个基地</Tag>}>
+        <Card className="surface-card org-tree-card" title="组织结构" extra={<Tag>{tree.bases.length} 个基地</Tag>}>
               <Tree showIcon defaultExpandAll treeData={treeData} />
             </Card>
           </Col>
           <Col xs={24} xl={18}>
             <Tabs
               items={[
+                {
+                  key: 'groups', label: '管理分组',
+                  children: <SimpleTable rows={tree.managementGroups} columns={[
+                    { title: '编码', dataIndex: 'code' }, { title: '名称', dataIndex: 'name' },
+                    { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag status={value} /> },
+                    { title: '操作', render: (_: unknown, row: ManagementGroup) => isGroupOrgAdmin && <Button type="link" icon={<EditOutlined />} onClick={() => open('managementGroup', row as unknown as Record<string, unknown>)}>编辑</Button> },
+                  ]} onAdd={isGroupOrgAdmin ? () => open('managementGroup') : undefined} />,
+                },
+                {
+                  key: 'companies', label: '公司',
+                  children: <SimpleTable rows={tree.companies.filter((company) => !company.isGroup)} columns={[
+                    { title: '编码', dataIndex: 'code' }, { title: '名称', dataIndex: 'name' },
+                    { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag status={value} /> },
+                    { title: '操作', render: (_: unknown, row: Company) => isGroupOrgAdmin && <Button type="link" icon={<EditOutlined />} onClick={() => open('company', row as unknown as Record<string, unknown>)}>编辑</Button> },
+                  ]} onAdd={isGroupOrgAdmin ? () => open('company') : undefined} />,
+                },
                 {
                   key: 'bases',
                   label: '生产基地',
@@ -363,12 +346,12 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
                       { title: '基地', dataIndex: 'name' },
                       { title: '所属公司', dataIndex: 'companyId', render: (value: string) => companyName.get(value) || '—' },
                       { title: '地址', dataIndex: 'address' },
+                      { title: '实际基地', dataIndex: 'siteConfirmed', render: (value: boolean) => value ? <Tag color="green">已确认</Tag> : <Tag color="gold">待确认</Tag> },
                       { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <StatusTag status={value} /> },
                       {
                         title: '操作', width: 150,
                         render: (_: unknown, row: ProductionBase) => <Space>
                           {canAtBase('org.manage', row.id) && <Button type="link" icon={<EditOutlined />} onClick={() => open('base', row as unknown as Record<string, unknown>)}>编辑</Button>}
-                          {canAtBase('org.manage', row.id) && <Popconfirm title="归档此基地？" onConfirm={() => void archive('base', row as unknown as Record<string, unknown>)}><Button type="link" danger>归档</Button></Popconfirm>}
                         </Space>,
                       },
                     ]}
@@ -376,36 +359,9 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
                   />,
                 },
                 {
-                  key: 'areas',
-                  label: '工区',
-                  children: <SimpleTable rows={tree.workAreas} columns={areaColumns} onAdd={canManageOrg ? () => open('area') : undefined} />,
-                },
-                {
-                  key: 'lines',
-                  label: '产线',
-                  children: <SimpleTable rows={tree.productionLines} columns={lineColumns} onAdd={canManageOrg ? () => open('line') : undefined} />,
-                },
-                {
-                  key: 'crews',
-                  label: '班组与成员',
-                  children: <>
-                    <SimpleTable rows={tree.crews} columns={crewColumns} onAdd={canManageOrg ? () => open('crew') : undefined} />
-                    <Card className="surface-card" style={{ marginTop: 18 }} title="班组成员有效期" extra={<Select style={{ width: 240 }} value={selectedCrew || undefined} onChange={setSelectedCrew} options={tree.crews.map((item) => ({ value: item.id, label: item.name }))} />}>
-                      <Table
-                        rowKey="id"
-                        size="small"
-                        pagination={false}
-                        dataSource={members}
-                        locale={{ emptyText: <Empty description="当前日期没有有效成员" /> }}
-                        columns={[
-                          { title: '人员', dataIndex: 'personId', render: (value: string) => personName.get(value) || value },
-                          { title: '角色', dataIndex: 'role', render: (value: string) => ({ leader: '班组长', operator: '操作员', support: '协作人员' } as Record<string, string>)[value] || value },
-                          { title: '生效', dataIndex: 'validFrom', render: formatDate },
-                          { title: '失效', dataIndex: 'validTo', render: formatDate },
-                        ]}
-                      />
-                    </Card>
-                  </>,
+                  key: 'factories',
+                  label: '饲料厂',
+                  children: <SimpleTable rows={tree.factories} columns={factoryColumns} onAdd={canManageOrg ? () => open('factory') : undefined} />,
                 },
               ]}
             />
@@ -415,7 +371,12 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
 
       {section === 'people' && (
         <Card className="surface-card" title="人员、资格与归属" extra={canManagePeople && <Button type="primary" icon={<PlusOutlined />} onClick={() => open('person')}>新增人员</Button>}>
-          <Table rowKey="id" columns={personColumns} dataSource={people} pagination={{ pageSize: 12 }} />
+          <Space wrap style={{ marginBottom: 16 }}>
+            <Input.Search placeholder="搜索姓名或工号" allowClear value={personSearch} onChange={(event) => setPersonSearch(event.target.value)} style={{ width: 240 }} />
+            <Select placeholder="筛选归属饲料厂" allowClear value={personFactory} onChange={setPersonFactory} style={{ width: 220 }} options={tree.factories.map((factory) => ({ value: factory.id, label: factory.name }))} />
+            <Select placeholder="筛选当前班组" allowClear value={personCrew} onChange={setPersonCrew} style={{ width: 220 }} options={tree.crews.filter((crew) => crew.status !== 'archived').map((crew) => ({ value: crew.id, label: crew.name }))} />
+          </Space>
+          <Table rowKey="id" columns={personColumns} dataSource={people.filter((person) => (!personFactory || person.factoryId === personFactory) && (!personCrew || person.crew?.crewId === personCrew) && `${person.name} ${person.employeeCode}`.toLowerCase().includes(personSearch.trim().toLowerCase()))} pagination={{ pageSize: 12 }} />
         </Card>
       )}
 
@@ -446,6 +407,7 @@ export default function OrgWorkspace({ initialSection = 'structure' }: { initial
               tree={tree}
               people={people}
               editing={Boolean(drawer.record?.id)}
+              personId={drawer.entity === 'person' ? drawer.record?.id as string | undefined : undefined}
             />
           </Form>
         )}
@@ -478,15 +440,19 @@ function EntityFields({
   tree,
   people,
   editing,
+  personId,
 }: {
   entity: Entity
   tree: OrgReferenceData
   people: Person[]
   editing: boolean
+  // Membership dates are maintained in 生产班组; the person form only mirrors them.
+  personId?: string
 }) {
+  const entityForm = Form.useFormInstance()
+  const { user } = useAuth()
   const companyOptions = tree.companies.map((company: Company) => ({ value: company.id, label: company.name }))
   const baseOptions = tree.bases.map((base: ProductionBase) => ({ value: base.id, label: base.name }))
-  const areaOptions = tree.workAreas.map((area: WorkArea) => ({ value: area.id, label: area.name }))
   const personOptions = people.map((person: Person) => ({ value: person.id, label: `${person.name} · ${person.employeeCode}` }))
   const commonStatus = (
     <Form.Item name="status" label="状态" initialValue="active">
@@ -494,37 +460,71 @@ function EntityFields({
     </Form.Item>
   )
 
+  if (entity === 'managementGroup') return <>
+    <Form.Item name="code" label="分组编码" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="name" label="分组名称" rules={[{ required: true }]}><Input /></Form.Item>
+    {commonStatus}
+  </>
+
+  if (entity === 'company') return <>
+    <Form.Item name="code" label="公司编码" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="name" label="公司名称" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="shortName" label="简称"><Input /></Form.Item>
+    <Form.Item name="payrollEnabled" label="可作为发薪公司" initialValue={true}><Select options={[{ value: true, label: '是' }, { value: false, label: '否' }]} /></Form.Item>
+    {commonStatus}
+  </>
+
   if (entity === 'base') return <>
     <Form.Item name="code" label="基地编码" rules={[{ required: true }]}><Input /></Form.Item>
     <Form.Item name="name" label="基地名称" rules={[{ required: true }]}><Input /></Form.Item>
     <Form.Item name="companyId" label="所属公司" rules={[{ required: true }]}><Select options={companyOptions} /></Form.Item>
     <Form.Item name="address" label="地址"><Input /></Form.Item>
+    {editing && user?.grants.some((grant) => grant.capability === 'org.manage' && grant.type === 'group') && <Form.Item name="siteConfirmed" label="实际作业基地确认" extra="仅在明确该记录对应实际作业基地时确认，管理分组不能用于计价。"><Select options={[{ value: true, label: '已确认' }, { value: false, label: '待确认' }]} /></Form.Item>}
     {commonStatus}
   </>
 
-  if (entity === 'area') return <>
-    <Form.Item name="code" label="工区编码" rules={[{ required: true }]}><Input /></Form.Item>
-    <Form.Item name="name" label="工区名称" rules={[{ required: true }]}><Input /></Form.Item>
-    <Form.Item name="baseId" label="所属基地" rules={[{ required: true }]}><Select disabled={editing} options={baseOptions} /></Form.Item>
-    <Form.Item name="parentId" label="上级工区"><Select allowClear options={areaOptions} /></Form.Item>
-    <Form.Item name="managerPersonId" label="工区负责人"><Select allowClear showSearch options={personOptions} /></Form.Item>
-    {commonStatus}
-  </>
-
-  if (entity === 'line') return <>
-    <Form.Item name="code" label="产线编码" rules={[{ required: true }]}><Input /></Form.Item>
-    <Form.Item name="name" label="产线名称" rules={[{ required: true }]}><Input /></Form.Item>
-    <Form.Item name="baseId" label="所属基地" rules={[{ required: true }]}><Select disabled={editing} options={baseOptions} /></Form.Item>
-    <Form.Item name="workAreaId" label="所属工区" rules={[{ required: true }]}><Select options={areaOptions} /></Form.Item>
+  if (entity === 'factory') return <>
+    <Form.Item name="code" label="饲料厂编码" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="name" label="饲料厂名称" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="baseId" label="所属基地" rules={[{ required: true }]}>
+      <Select
+        options={baseOptions}
+        onChange={(baseId: string) => {
+          entityForm.setFieldsValue({
+            companyId: tree.bases.find((item) => item.id === baseId)?.companyId,
+            factoryId: undefined,
+          })
+        }}
+      />
+    </Form.Item>
+    <Form.Item name="companyId" label="工资主体公司" rules={[{ required: true }]}>
+      <Select options={companyOptions.filter((item) => item.value !== 'group')} />
+    </Form.Item>
+    <Form.Item name="managementGroupId" label="管理分组"><Select allowClear options={tree.managementGroups.map((group) => ({ value: group.id, label: group.name }))} /></Form.Item>
+    <Form.Item name="factoryType" label="工厂类型" initialValue="feed_mill">
+      <Select options={[
+        { value: 'direct_mill', label: '直属厂' },
+        { value: 'feed_mill', label: '生产基地饲料厂' },
+        { value: 'other', label: '其他工厂' },
+      ]} />
+    </Form.Item>
+    <Form.Item name="managerPersonId" label="工厂负责人"><Select allowClear showSearch options={personOptions} /></Form.Item>
+    <Form.Item name="sortOrder" label="显示顺序" initialValue={0}><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+    <Form.Item name="address" label="地址"><Input /></Form.Item>
     {commonStatus}
   </>
 
   if (entity === 'crew') return <>
-    <Form.Item name="code" label="班组编码" rules={[{ required: true }]}><Input /></Form.Item>
-    <Form.Item name="name" label="班组名称" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="code" label="生产班编码" rules={[{ required: true }]}><Input /></Form.Item>
+    <Form.Item name="name" label="生产班名称" rules={[{ required: true }]}><Input /></Form.Item>
     <Form.Item name="baseId" label="所属基地" rules={[{ required: true }]}><Select disabled={editing} options={baseOptions} /></Form.Item>
-    <Form.Item name="workAreaId" label="所属工区" rules={[{ required: true }]}><Select options={areaOptions} /></Form.Item>
-    <Form.Item name="leaderPersonId" label="班组长"><Select allowClear showSearch options={personOptions} /></Form.Item>
+    <Form.Item name="factoryId" label="所属饲料厂" rules={[{ required: true }]}>
+      <Select
+        options={tree.factories
+          .filter((factory) => !entityForm.getFieldValue('baseId') || factory.baseId === entityForm.getFieldValue('baseId'))
+          .map((factory) => ({ value: factory.id, label: factory.name }))}
+      />
+    </Form.Item>
     {commonStatus}
   </>
 
@@ -533,8 +533,22 @@ function EntityFields({
     <Form.Item name="name" label="姓名" rules={[{ required: true }]}><Input /></Form.Item>
     <Form.Item name="mobile" label="手机号"><Input /></Form.Item>
     <Form.Item name="homeCompanyId" label="所属公司（工资主体）" rules={[{ required: true }]}><Select options={companyOptions.filter((item) => item.value !== 'group')} /></Form.Item>
-    <Form.Item name="homeBaseId" label="归属基地" rules={[{ required: true }]}><Select options={baseOptions} /></Form.Item>
+    <Form.Item name="homeBaseId" label="归属基地" rules={[{ required: true }]}>
+      <Select
+        options={baseOptions}
+        onChange={() => entityForm.setFieldsValue({ factoryId: undefined })}
+      />
+    </Form.Item>
+    <Form.Item name="factoryId" label="归属饲料厂">
+      <Select
+        allowClear
+        options={tree.factories
+          .filter((factory) => !entityForm.getFieldValue('homeBaseId') || factory.baseId === entityForm.getFieldValue('homeBaseId'))
+          .map((factory) => ({ value: factory.id, label: factory.name }))}
+      />
+    </Form.Item>
     {commonStatus}
+    {personId && <PersonCrewRelations personId={personId} />}
   </>
 
   if (entity === 'secondment') return <>
@@ -547,13 +561,17 @@ function EntityFields({
       <Col span={12}><Form.Item name="toCompanyId" label="接收公司" rules={[{ required: true }]}><Select options={companyOptions.filter((item) => item.value !== 'group')} /></Form.Item></Col>
       <Col span={12}><Form.Item name="toBaseId" label="实际作业基地" rules={[{ required: true }]}><Select options={baseOptions} /></Form.Item></Col>
     </Row>
+    <Form.Item name="toFactoryId" label="接收工厂" rules={[{ required: true }]}>
+      <Select options={tree.factories.filter((factory) => factory.status === 'active').map((factory) => ({ value: factory.id, label: `${factory.name} · ${baseOptions.find((base) => base.value === factory.baseId)?.label || factory.baseId}` }))} />
+    </Form.Item>
     <Row gutter={12}>
       <Col span={12}><Form.Item name="startDate" label="开始日期" rules={[{ required: true }]}><Input placeholder="2026-10-01" /></Form.Item></Col>
       <Col span={12}><Form.Item name="endDate" label="结束日期" rules={[{ required: true }]}><Input placeholder="2026-10-31" /></Form.Item></Col>
     </Row>
     <Form.Item name="purpose" label="借调事由"><Input.TextArea rows={3} /></Form.Item>
     <Form.Item name="status" label="状态" initialValue="planned">
-      <Select options={Object.entries(secondmentLabel).map(([value, label]) => ({ value, label }))} />
+      {/* 已到期由日期推导，不参与手工调整；取消与完成都在编辑中处理。 */}
+      <Select options={Object.entries(secondmentLabel).filter(([value]) => value !== 'expired').map(([value, label]) => ({ value, label }))} />
     </Form.Item>
   </>
 
@@ -565,12 +583,59 @@ function EntityFields({
   </>
 }
 
+/** Read-only crew relations of one person; editing stays in 生产班组. */
+function PersonCrewRelations({ personId }: { personId: string }) {
+  const [relations, setRelations] = useState<PersonCrewHistory[] | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let alive = true
+    api.get<PersonCrewHistory[]>(`/org/people/${personId}/crew-relations`)
+      .then((rows) => { if (alive) setRelations(rows) })
+      .catch((reason) => { if (alive) setError(errorMessage(reason)) })
+    return () => { alive = false }
+  }, [personId])
+  const relationTag: Record<PersonCrewHistory['relation'], string> = {
+    current: 'green', future: 'blue', ended: 'default',
+  }
+  const relationText: Record<PersonCrewHistory['relation'], string> = {
+    current: '当前', future: '未来', ended: '已结束',
+  }
+  return (
+    <Card size="small" title="班组归属" style={{ marginTop: 8 }}>
+      {error && <Typography.Text type="danger">{error}</Typography.Text>}
+      {!error && !relations && <Typography.Text type="secondary">加载中…</Typography.Text>}
+      {!error && relations && relations.length === 0 && (
+        <Typography.Text type="secondary">未分配班组，请在「生产班组」的编辑中添加成员关系。</Typography.Text>
+      )}
+      {relations && relations.length > 0 && (
+        <Table
+          rowKey="membershipId"
+          size="small"
+          pagination={false}
+          dataSource={relations}
+          columns={[
+            { title: '班组', dataIndex: 'crewName' },
+            { title: '岗位', dataIndex: 'role', render: (value: string) => crewRoleLabels[value] || value },
+            { title: '有效期', render: (_: unknown, row) => `${formatDate(row.validFrom)} 至 ${row.validTo ? formatDate(row.validTo) : '长期'}` },
+            { title: '关系', dataIndex: 'relation', width: 80, render: (value: PersonCrewHistory['relation']) => <Tag color={relationTag[value]}>{relationText[value]}</Tag> },
+          ]}
+        />
+      )}
+      <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+        同一人员在任何日期只属于一个班组；调班请先在原班组结束关系，再到新班组登记。
+      </Typography.Paragraph>
+    </Card>
+  )
+}
+
 function AccessPanel({ enabled }: { enabled: boolean }) {
   const { message } = App.useApp()
   const [options, setOptions] = useState<AccessOptions | null>(null)
   const [rows, setRows] = useState<AccessAssignment[]>([])
   const [loading, setLoading] = useState(true)
+  const [editingAccount, setEditingAccount] = useState<string | null>(null)
   const [form] = Form.useForm()
+  useAntFormUnsavedChanges(form, Boolean(editingAccount), '账号授权')
 
   const load = useCallback(async () => {
     if (!enabled) { setLoading(false); return }
@@ -591,18 +656,26 @@ function AccessPanel({ enabled }: { enabled: boolean }) {
   useEffect(() => { void load() }, [load])
 
   if (!enabled) {
-    return <Card className="surface-card"><Empty description="仅集团管理员可维护跨基地角色授权" /></Card>
+    return <Card className="surface-card"><Empty description="仅总部权限管理员可维护跨基地角色授权" /></Card>
   }
   if (loading) return <LoadingBlock />
 
   const accountName = new Map((options?.accounts || []).map((item) => [item.id, item.displayName]))
   const scopeName = new Map((options?.scopes || []).map((item) => [`${item.type}:${item.id}`, item.label]))
+  const accountRows = (options?.accounts || [])
+    .map((account) => ({
+      account,
+      assignments: rows.filter((row) => row.accountId === account.id),
+    }))
+
+  const editingAssignments = rows.filter((row) => row.accountId === editingAccount)
 
   const add = async () => {
-    const values = await form.validateFields()
+    if (!editingAccount) return
     try {
+      const values = await form.validateFields()
       await api.post('/org/access/assignments', {
-        accountId: values.accountId,
+        accountId: editingAccount,
         roleId: values.roleId,
         scope: { type: values.scopeType, id: values.scopeId },
         validFrom: null,
@@ -627,16 +700,58 @@ function AccessPanel({ enabled }: { enabled: boolean }) {
   }
 
   return (
-    <Row gutter={[18, 18]}>
-      <Col xs={24} xl={9}>
-        <Card className="surface-card" title="新增授权">
-          <Typography.Paragraph type="secondary">
-            能力由角色定义，数据范围单独授予。集团管理员可授权到公司、基地或工区；基地管理员不能自行扩大范围。
-          </Typography.Paragraph>
+    <Card className="surface-card" title="账号授权">
+      <Typography.Paragraph type="secondary">
+        能力由角色定义，数据范围单独授予。总部权限管理员可授权到公司、基地或具体饲料厂；添加与撤销统一在「编辑授权」中进行。
+      </Typography.Paragraph>
+      <Table
+        rowKey={(row) => row.account.id}
+        size="small"
+        dataSource={accountRows}
+        pagination={{ pageSize: 12 }}
+        columns={[
+          { title: '账号', render: (_: unknown, row) => <Space direction="vertical" size={0}><b>{row.account.displayName}</b><small>{row.account.username}</small></Space> },
+          {
+            title: '角色与数据范围',
+            render: (_: unknown, row) => row.assignments.length
+              ? <Space wrap>{row.assignments.map((item) => (
+                  <Tag key={item.id}>{item.roleName} · {scopeName.get(`${item.scope.type}:${item.scope.id}`) || item.scope.id}</Tag>
+                ))}</Space>
+              : <Typography.Text type="secondary">未授权</Typography.Text>,
+          },
+          {
+            title: '操作', width: 110,
+            render: (_: unknown, row) => <Button type="link" icon={<EditOutlined />} onClick={() => { form.resetFields(); setEditingAccount(row.account.id) }}>编辑授权</Button>,
+          },
+        ]}
+      />
+      <Drawer
+        title={`编辑授权 · ${editingAccount ? accountName.get(editingAccount) || editingAccount : ''}`}
+        width={560}
+        open={Boolean(editingAccount)}
+        onClose={() => setEditingAccount(null)}
+      >
+        <Table
+          rowKey="id"
+          size="small"
+          pagination={false}
+          dataSource={editingAssignments}
+          columns={[
+            { title: '角色', dataIndex: 'roleName' },
+            { title: '数据范围', render: (_: unknown, row: AccessAssignment) => scopeName.get(`${row.scope.type}:${row.scope.id}`) || row.scope.id },
+            { title: '生效', dataIndex: 'validFrom', render: formatDateTime },
+            {
+              title: '操作', width: 80,
+              render: (_: unknown, row: AccessAssignment) => (
+                <Popconfirm title="撤销此授权？" onConfirm={() => void remove(row.id)}>
+                  <Button type="link" danger>撤销</Button>
+                </Popconfirm>
+              ),
+            },
+          ]}
+        />
+        <Card size="small" title="添加授权" style={{ marginTop: 16 }}>
           <Form form={form} layout="vertical">
-            <Form.Item name="accountId" label="账号" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" options={options?.accounts.map((item) => ({ value: item.id, label: `${item.displayName} · ${item.username}` }))} />
-            </Form.Item>
             <Form.Item name="roleId" label="角色" rules={[{ required: true }]}>
               <Select options={options?.roles.map((item) => ({ value: item.id, label: item.name }))} />
             </Form.Item>
@@ -655,37 +770,14 @@ function AccessPanel({ enabled }: { enabled: boolean }) {
             <Button type="primary" block onClick={() => void add()}>添加授权</Button>
           </Form>
         </Card>
-      </Col>
-      <Col xs={24} xl={15}>
-        <Card className="surface-card" title="当前授权">
-          <Table
-            rowKey="id"
-            size="small"
-            dataSource={rows}
-            pagination={{ pageSize: 12 }}
-            columns={[
-              { title: '账号', dataIndex: 'accountId', render: (value: string) => accountName.get(value) || value },
-              { title: '角色', dataIndex: 'roleName' },
-              {
-                title: '数据范围',
-                render: (_, row: AccessAssignment) => scopeName.get(`${row.scope.type}:${row.scope.id}`) || row.scope.id,
-              },
-              { title: '生效', dataIndex: 'validFrom', render: formatDateTime },
-              {
-                title: '操作', width: 90,
-                render: (_, row: AccessAssignment) => <Popconfirm title="撤销此授权？" onConfirm={() => void remove(row.id)}><Button type="link" danger>撤销</Button></Popconfirm>,
-              },
-            ]}
-          />
-        </Card>
-      </Col>
-    </Row>
+      </Drawer>
+    </Card>
   )
 }
 
 export function QualificationPanel({ rows, canManage }: { rows: Qualification[]; canManage: boolean }) {
   return (
-    <Descriptions title="集团作业资格" extra={canManage ? <Tag color="green">可维护</Tag> : <Tag>只读</Tag>}>
+    <Descriptions title="饲料总部统一作业资格" extra={canManage ? <Tag color="green">可维护</Tag> : <Tag>只读</Tag>}>
       {rows.map((item) => (
         <Descriptions.Item key={item.id} label={item.name}>{item.description || item.code}</Descriptions.Item>
       ))}

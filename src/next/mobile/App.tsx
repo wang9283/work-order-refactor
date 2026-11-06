@@ -1,73 +1,124 @@
-import { useEffect, useState } from 'react'
-import { Button, Card, Form, Input, NavBar, Space, Tag, Toast } from 'antd-mobile'
+import { useCallback, useEffect, useState } from 'react'
+import { Button, Card, NavBar, TabBar, Toast } from 'antd-mobile'
+import { CalendarOutline, CheckCircleOutline, FileOutline, UserOutline } from 'antd-mobile-icons'
+import type { OperationsContext } from '@contracts/operations'
+import type { DemoIdentityId } from '@contracts/index'
 import { AuthProvider, useAuth } from '@next/shared/auth'
 import { errorMessage } from '@next/shared/api'
+import { operationsApi } from '@next/shared/operations-api'
+import { WorkPage } from './WorkPage'
+import { SchedulePage } from './SchedulePage'
+import { WorkloadPage } from './WorkloadPage'
+import { Empty, ErrorNotice } from './components'
 
-function MobileLogin() {
-  const { login } = useAuth()
-  const [loading, setLoading] = useState(false)
-  async function submit(values: { username: string; password: string }) {
-    setLoading(true)
-    try {
-      await login(values)
-    } catch (reason) {
-      Toast.show({ icon: 'fail', content: errorMessage(reason) })
-    } finally {
-      setLoading(false)
-    }
-  }
-  return (
-    <main className="mobile-login">
-      <div className="mobile-brand"><img src="/logo.svg" alt="东方希望" /><Tag color="warning" fill="outline">V3</Tag></div>
-      <h1>移动执行台</h1>
-      <p>接收基地待办、填写冻结表单，并核对本月个人计件收入。</p>
-      <Card className="mobile-login-card">
-        <Form
-          layout="vertical"
-          initialValues={{ username: 'executor.demo', password: 'Feed2026!' }}
-          onFinish={(values) => void submit(values)}
-        >
-          <Form.Item name="username" label="账号"><Input placeholder="executor.demo" /></Form.Item>
-          <Form.Item name="password" label="密码"><Input type="password" placeholder="Feed2026!" /></Form.Item>
-          <Button block color="primary" size="large" type="submit" loading={loading}>登录</Button>
-        </Form>
-      </Card>
-    </main>
-  )
+type MobileTab = 'work' | 'schedule' | 'workload' | 'me'
+const tabs = {
+  work: { title: '作业', description: '查看本人作业，临时工作随手记录。' },
+  schedule: { title: '日程', description: '看清今天的班次、岗位和作业安排。' },
+  workload: { title: '工作量', description: '按日核对已完成工单，确认本人分配量。' },
+  me: { title: '我的', description: '账号信息与个人作业身份。' },
 }
 
 function MobileShell() {
-  const { user, logout } = useAuth()
-  return (
-    <div className="mobile-frame">
-      <NavBar back={null} className="mobile-nav">
-        <Space><img src="/logo.svg" alt="" className="nav-logo" /><span>集团作业 V3</span></Space>
-      </NavBar>
-      <div className="mobile-hero">
-        <span className="mobile-eyebrow">TODAY / {new Date().toLocaleDateString('zh-CN')}</span>
-        <h1>{user?.displayName}，准备开始作业</h1>
-        <p>执行端使用独立 API。工单版本、人员归属和计价规则均以服务端记录为准。</p>
-      </div>
-      <Card className="mobile-status-card">
-        <div className="mobile-status-row"><span>当前能力</span><b>{user?.grants.length || 0} 项</b></div>
-        <div className="mobile-status-row"><span>角色范围</span><b>{user?.assignments[0]?.scope.type || '未分配'}</b></div>
-        <div className="mobile-status-row"><span>数据源</span><b>V3 服务端</b></div>
-      </Card>
-      <div className="mobile-notice">
-        <strong>执行页面接线中</strong>
-        <span>Agent C 完成后，此处显示待办、动态表单、提交记录和个人收入。</span>
-      </div>
-      <Button block fill="outline" color="primary" onClick={() => void logout()}>退出登录</Button>
-    </div>
-  )
+  const {
+    user,
+    identities,
+    activeIdentity,
+    bases,
+    activeBase,
+    switchIdentity,
+    switchBase,
+    contextVersion,
+    error: contextError,
+    refresh: refreshAuth,
+  } = useAuth()
+  const [tab, setTab] = useState<MobileTab>('work')
+  const [context, setContext] = useState<OperationsContext | null>(null)
+  const [date, setDate] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [version, setVersion] = useState(0)
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { const next = await operationsApi.context(); setContext(next); setDate(current => current || next.today) }
+    catch (reason) { setError(errorMessage(reason)) }
+    finally { setLoading(false) }
+  }, [contextVersion, user?.accountId])
+  useEffect(() => { void load() }, [load])
+  const changed = () => setVersion(current => current + 1)
+  const me = context?.people.find(person => person.id === context.personId)
+  return <div className="mobile-frame mobile-app-frame">
+    <NavBar
+      back={null}
+      className="mobile-nav"
+      right={<div className="mobile-context-controls">
+        <label className="mobile-context-switch">
+          <span>基地</span>
+          <select
+            aria-label="切换生产基地"
+            value={activeBase?.id}
+            onChange={(event) => {
+              void switchBase(event.target.value).catch((reason) => {
+                Toast.show({ icon: 'fail', content: errorMessage(reason) })
+              })
+            }}
+          >
+            {bases.map((base) => (
+              <option key={base.id} value={base.id}>
+                {base.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="mobile-context-switch">
+          <span>身份</span>
+          <select
+            aria-label="切换角色身份"
+            value={activeIdentity?.id}
+            onChange={(event) => {
+              void switchIdentity(event.target.value as DemoIdentityId)
+            }}
+          >
+            {identities.map((identity) => (
+              <option key={identity.id} value={identity.id} disabled={!identity.available}>
+                {identity.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>}
+    >
+      <img src="/logo.svg" alt="东方希望" className="nav-logo" />
+    </NavBar>
+    <header className="mobile-page-heading"><div><h1>{tabs[tab].title}</h1><p>{tabs[tab].description}</p></div><span className="mobile-greeting">{user?.displayName?.slice(0, 1)}</span></header>
+    {contextError && <ErrorNotice message={contextError} retry={() => void refreshAuth()} />}
+    {loading && <Empty>正在读取作业信息…</Empty>}
+    {error && <ErrorNotice message={error} retry={() => void load()} />}
+    {!loading && context && !error && <>
+      {tab === 'work' && <WorkPage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
+      {tab === 'schedule' && <SchedulePage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
+      {tab === 'workload' && <WorkloadPage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
+      {tab === 'me' && <div className="mobile-card-list"><Card><div className="mobile-profile"><span>{user?.displayName?.slice(0, 1)}</span><div><h2>{user?.displayName}</h2><p>{me?.employeeCode || '未关联员工编号'}</p></div></div><div className="mobile-detail-field"><span>生产基地</span><b>{activeBase?.name || '未选择'}</b></div><div className="mobile-detail-field"><span>演示身份</span><b>{activeIdentity?.label || '未分配'}</b></div><div className="mobile-detail-field"><span>所属班组</span><b>{context.crews.filter(crew => me?.crewIds.includes(crew.id)).map(crew => crew.name).join('、') || '未分配'}</b></div><div className="mobile-detail-field"><span>当前角色</span><b>{user?.assignments.map(assignment => assignment.role.name).join('、') || '未分配'}</b></div>{context.crews.some(crew => crew.canManage) && <div className="mobile-detail-field"><span>可管理班组</span><b>{context.crews.filter(crew => crew.canManage).map(crew => crew.name).join('、')}</b></div>}</Card><p className="mobile-profile-note">计件工作量以最新分配记录为准。页面预计单价仅供参考，实际工资由薪酬系统核算。</p></div>}
+    </>}
+    <TabBar activeKey={tab} onChange={key => setTab(key as MobileTab)} className="mobile-tabbar">
+      <TabBar.Item key="work" icon={<FileOutline />} title="作业" />
+      <TabBar.Item key="schedule" icon={<CalendarOutline />} title="日程" />
+      <TabBar.Item key="workload" icon={<CheckCircleOutline />} title="工作量" />
+      <TabBar.Item key="me" icon={<UserOutline />} title="我的" />
+    </TabBar>
+  </div>
 }
 
 function Gate() {
-  const { user, loading } = useAuth()
-  if (loading) return <div className="mobile-boot">正在连接作业服务</div>
-  return user ? <MobileShell /> : <MobileLogin />
+  const { user, loading, switching, error, refresh } = useAuth()
+  if (loading || switching) return <div className="mobile-boot">正在连接作业服务</div>
+  if (!user) return <main className="mobile-context-error">
+    <img src="/logo.svg" alt="东方希望" />
+    <h1>暂时无法进入</h1>
+    <p>{error || '没有可用的演示身份'}</p>
+    <Button color="primary" onClick={() => void refresh()}>重新连接</Button>
+  </main>
+  return <MobileShell />
 }
 
-export default function App() {
-  return <AuthProvider><Gate /></AuthProvider>
-}
+export default function App() { return <AuthProvider surface="mobile"><Gate /></AuthProvider> }

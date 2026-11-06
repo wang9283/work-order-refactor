@@ -18,6 +18,7 @@ export const capabilities = [
   'form.publish',
   'ticket_type.view',
   'ticket_type.manage',
+  'business_catalog.manage',
   'work_profile.view',
   'work_profile.manage',
   'excel_import.manage',
@@ -76,6 +77,70 @@ export interface LoginResult {
   expiresAt: string
   user: CurrentUser
 }
+
+export const demoIdentityIds = [
+  'group-admin',
+  'base-admin',
+  'production-manager',
+  'crew-leader',
+  'employee',
+  'sanitation-worker',
+  'payroll',
+] as const
+
+export type DemoIdentityId = (typeof demoIdentityIds)[number]
+
+export interface DemoIdentityOption {
+  id: DemoIdentityId
+  label: string
+  description: string
+  username: string
+  accountId: Id | null
+  displayName: string
+  roleName: string
+  available: boolean
+  unavailableReason: string | null
+  defaultForAdmin: boolean
+  defaultForMobile: boolean
+}
+
+export interface DemoAuthOptions {
+  enabled: boolean
+  identities: DemoIdentityOption[]
+}
+
+export interface DemoBaseOption {
+  id: Id
+  code: string
+  name: string
+  companyId: Id
+}
+
+export const demoLoginSchema = z.object({
+  identityId: z.enum(demoIdentityIds),
+  baseId: z.string().trim().min(1).optional(),
+})
+
+export type DemoLoginInput = z.infer<typeof demoLoginSchema>
+
+export interface DemoLoginResult extends LoginResult {
+  identity: DemoIdentityOption
+  bases: DemoBaseOption[]
+  activeBase: DemoBaseOption
+}
+
+export interface DemoSessionResult {
+  identity: DemoIdentityOption
+  user: CurrentUser
+  bases: DemoBaseOption[]
+  activeBase: DemoBaseOption
+}
+
+export const demoBaseSwitchSchema = z.object({
+  baseId: z.string().trim().min(1),
+})
+
+export type DemoBaseSwitchInput = z.infer<typeof demoBaseSwitchSchema>
 
 export interface PermissionCheck {
   capability: Capability

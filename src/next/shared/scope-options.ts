@@ -4,7 +4,7 @@ export function scopeOptions(reference: OrgReferenceData | null): Array<{ label:
   if (!reference) return []
   const group = reference.companies.find((company) => company.isGroup)
   return [
-    ...(group ? [{ label: `集团 · ${group.name}`, value: 'group:group', scope: { type: 'group' as const, id: 'group' } }] : []),
+    ...(group ? [{ label: `饲料总部 · ${group.name}`, value: 'group:group', scope: { type: 'group' as const, id: 'group' } }] : []),
     ...reference.companies.filter((company) => !company.isGroup).map((company) => ({
       label: `公司 · ${company.name}`,
       value: `company:${company.id}`,

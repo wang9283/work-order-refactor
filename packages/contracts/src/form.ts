@@ -81,6 +81,7 @@ export interface FormTemplate extends AuditFields {
   ownerType: 'group' | 'company'
   ownerId: Id
   source: 'native' | 'excel'
+  locked: boolean
   currentPublishedVersionId: Id | null
 }
 
@@ -106,7 +107,7 @@ export const formFieldSchema = z.object({
   id: z.string().min(1),
   key: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/, '字段标识必须以字母开头'),
   name: z.string().trim().min(1).max(80),
-  type: z.enum(formFieldTypes),
+  type: z.enum(formFieldTypes).refine((type) => type !== 'photo' && type !== 'attachment', '当前不允许照片或附件字段'),
   required: z.boolean().default(false),
   strategy: z.enum(fieldStrategies).default('optional'),
   sort: z.number().int().nonnegative(),
@@ -141,6 +142,23 @@ export const formVersionSchema = z.object({
     action: z.enum(['show', 'hide', 'require', 'disable']),
     targetKeys: z.array(z.string()),
   })).default([]),
+}) .superRefine((schema, context) => {
+  const checkFields = (fields: typeof schema.mainFields, path: (string | number)[]) => {
+    const keys = new Set<string>()
+    fields.forEach((field,index) => {
+      if (keys.has(field.key)) context.addIssue({code:'custom',path:[...path,index,'key'],message:'字段标识不能重复'})
+      keys.add(field.key)
+      if ((field.type === 'single_select' || field.type === 'multi_select') && !field.options?.length) context.addIssue({code:'custom',path:[...path,index,'options'],message:'选择字段至少需要一个选项'})
+    })
+  }
+  checkFields(schema.mainFields,['mainFields'])
+  const keys = new Set<string>()
+  schema.subForms.forEach((sub,index) => {
+    if(keys.has(sub.key)) context.addIssue({code:'custom',path:['subForms',index,'key'],message:'明细表标识不能重复'})
+    keys.add(sub.key)
+    if(sub.minRecords > sub.maxRecords) context.addIssue({code:'custom',path:['subForms',index,'minRecords'],message:'最少行数不能超过最多行数'})
+    checkFields(sub.fields,['subForms',index,'fields'])
+  })
 })
 
 export type FormValues = Record<string, unknown>

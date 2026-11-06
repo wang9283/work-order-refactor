@@ -4,11 +4,17 @@ import type {
   Company,
   Crew,
   CrewMembership,
+  CrewScope,
   CrewMemberRole,
+  Factory,
+  HandoverShiftProfile,
+  ManagementGroup,
   OrgReferenceData,
   PageQuery,
   PagedResult,
   Person,
+  PersonCrewHistory,
+  PersonCrewSummary,
   PersonQualification,
   ProductionBase,
   ProductionLine,
@@ -16,11 +22,13 @@ import type {
   ScopeRef,
   Secondment,
   SecondmentStatus,
+  ShiftTemplate,
   WorkArea,
 } from '../../../packages/contracts/src'
 import { toPageMeta } from '../../../packages/contracts/src'
 import { writeAudit } from '../../core/audit'
-import type { AuthContext } from '../../core/auth'
+import { requireScopedBase, scopedBaseId, withinScopedBase } from '../../core/base-scope'
+import { hasGrant, type AuthContext } from '../../core/auth'
 import { AppError } from '../../core/errors'
 import { newId, nowIso, one, run, transaction } from '../../db/database'
 import { all } from '../../db/database'
@@ -30,6 +38,171 @@ type IdRow = { id: string }
 type RevisionRow = { revision: number }
 type StatusRow = { status: string }
 
+// Derived crew columns shared by every crew read model so the list, tree and
+// detail views always agree on leaders and member counts.
+const crewDerivedColumns = `
+  (SELECT json_group_array(cm.person_id) FROM crew_memberships cm
+     WHERE cm.crew_id = crews.id AND cm.role = 'leader'
+       AND cm.valid_from <= date('now','localtime')
+       AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime'))) AS leaderPersonIdsJson,
+  (SELECT COUNT(*) FROM crew_memberships cm
+     WHERE cm.crew_id = crews.id
+       AND cm.valid_from <= date('now','localtime')
+       AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime'))) AS memberCount`
+
+const crewLeaderNamesColumn = `
+  (SELECT json_group_array(p.name || ' · ' || p.employee_code) FROM crew_memberships cm
+     JOIN people p ON p.id = cm.person_id
+    WHERE cm.crew_id = crews.id AND cm.role = 'leader'
+      AND cm.valid_from <= date('now','localtime')
+      AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime'))) AS leaderNamesJson`
+
+type CrewRow = Omit<Crew, 'leaderPersonIds' | 'leaderNames'> & {
+  leaderPersonIdsJson: string | null
+  leaderNamesJson?: string | null
+}
+
+function mapCrewRow(row: CrewRow): Crew {
+  const { leaderPersonIdsJson, leaderNamesJson, ...rest } = row
+  let leaderPersonIds: string[] = []
+  try {
+    leaderPersonIds = JSON.parse(leaderPersonIdsJson ?? '[]') as string[]
+  } catch {
+    leaderPersonIds = []
+  }
+  let leaderNames: string[] = []
+  try {
+    leaderNames = JSON.parse(leaderNamesJson ?? '[]') as string[]
+  } catch {
+    leaderNames = []
+  }
+  return { ...rest, leaderPersonIds, leaderNames }
+}
+
+function todayLocal(): string {
+  return new Date().toLocaleDateString('en-CA')
+}
+
+/** Membership covering the given date; unique per person thanks to the overlap rule. */
+function currentCrewSummary(personId: string): PersonCrewSummary | null {
+  const row = one<Omit<PersonCrewSummary, 'crewName'> & { crewName: string }>(
+    `SELECT cm.crew_id AS crewId, c.name AS crewName, cm.role,
+            cm.valid_from AS validFrom, cm.valid_to AS validTo
+       FROM crew_memberships cm JOIN crews c ON c.id = cm.crew_id
+      WHERE cm.person_id = ? AND c.status <> 'archived'
+        AND cm.valid_from <= date('now','localtime')
+        AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime'))
+      ORDER BY cm.valid_from LIMIT 1`,
+    [personId],
+  )
+  return row ?? null
+}
+
+function chunk<T>(items: T[], size = 400): T[][] {
+  const out: T[][] = []
+  for (let index = 0; index < items.length; index += size) out.push(items.slice(index, index + size))
+  return out
+}
+
+/** Batch crew summary lookup so the person list stays a fixed number of queries. */
+function crewSummariesFor(personIds: string[]): Map<string, PersonCrewSummary> {
+  const map = new Map<string, PersonCrewSummary>()
+  for (const batch of chunk(personIds)) {
+    const placeholders = batch.map(() => '?').join(',')
+    all<{ personId: string } & Omit<PersonCrewSummary, 'crewName'> & { crewName: string }>(
+      `SELECT cm.person_id AS personId, cm.crew_id AS crewId, c.name AS crewName, cm.role,
+              cm.valid_from AS validFrom, cm.valid_to AS validTo
+         FROM crew_memberships cm JOIN crews c ON c.id = cm.crew_id
+        WHERE cm.person_id IN (${placeholders}) AND c.status <> 'archived'
+          AND cm.valid_from <= date('now','localtime')
+          AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime'))
+        ORDER BY cm.valid_from`,
+      batch,
+    ).forEach((row) => {
+      if (map.has(row.personId)) return
+      const { personId, ...summary } = row
+      map.set(personId, summary)
+    })
+  }
+  return map
+}
+
+function qualificationsFor(personIds: string[]): Map<string, Person['qualifications']> {
+  const map = new Map<string, Person['qualifications']>()
+  for (const batch of chunk(personIds)) {
+    const placeholders = batch.map(() => '?').join(',')
+    all<{ personId: string } & PersonQualification & { qualificationName: string; qualificationCode: string }>(
+      `SELECT pq.person_id AS personId, pq.id, pq.qualification_id AS qualificationId,
+              pq.valid_from AS validFrom, pq.valid_to AS validTo,
+              pq.certificate_no AS certificateNo, pq.revision,
+              pq.created_at AS createdAt, pq.created_by AS createdBy,
+              pq.updated_at AS updatedAt, pq.updated_by AS updatedBy,
+              q.name AS qualificationName, q.code AS qualificationCode
+         FROM person_qualifications pq
+         JOIN qualifications q ON q.id = pq.qualification_id
+        WHERE pq.person_id IN (${placeholders})
+        ORDER BY pq.person_id, q.name, pq.valid_from DESC`,
+      batch,
+    ).forEach((row) => {
+      const list = map.get(row.personId) ?? []
+      list.push(row)
+      map.set(row.personId, list)
+    })
+  }
+  return map
+}
+
+function canViewCrew(auth: AuthContext, crewId: string): boolean {
+  const row = one<{ base_id: string; factory_id: string | null }>(
+    'SELECT base_id, factory_id FROM crews WHERE id = ?', [crewId],
+  )
+  if (!row) return false
+  return hasGrant(auth, 'crew.view', {
+    type: row.factory_id ? 'factory' : 'base',
+    id: row.factory_id || row.base_id,
+  })
+}
+
+/**
+ * Cross-crew overlap check. The message names the conflicting crew only when the
+ * caller may see it; otherwise it stays generic so scoped accounts cannot probe
+ * other mills' rosters.
+ */
+function assertNoCrewOverlap(personId: string, excludeMembershipId: string | null, from: string, to: string | null, auth: AuthContext): void {
+  const conflict = one<{ crewId: string; crewName: string; validFrom: string; validTo: string | null }>(
+    `SELECT cm.crew_id AS crewId, c.name AS crewName,
+            cm.valid_from AS validFrom, cm.valid_to AS validTo
+       FROM crew_memberships cm JOIN crews c ON c.id = cm.crew_id
+      WHERE cm.person_id = ?
+        AND (? IS NULL OR cm.id <> ?)
+        AND cm.valid_from <= COALESCE(?, '9999-12-31')
+        AND COALESCE(cm.valid_to, '9999-12-31') >= ?
+      ORDER BY cm.valid_from LIMIT 1`,
+    [personId, excludeMembershipId, excludeMembershipId, to, from],
+  )
+  if (!conflict) return
+  if (!canViewCrew(auth, conflict.crewId)) {
+    throw AppError.conflict('该人员在此日期范围已属于其他班组，请联系对应管理员先结束原关系')
+  }
+  const range = `${conflict.validFrom} 至 ${conflict.validTo || '长期'}`
+  throw AppError.conflict(
+    `该人员在所选日期内已属于「${conflict.crewName}」（${range}），请先结束该班组关系再登记新关系`,
+    { crewId: conflict.crewId, validFrom: conflict.validFrom, validTo: conflict.validTo },
+  )
+}
+
+/** Translate the SQLite overlap trigger into the API error contract. */
+function runMembership<T>(action: () => T): T {
+  try {
+    return action()
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('已属于其他班组')) {
+      throw AppError.conflict('该人员在所选日期内已属于其他班组，请先结束原班组关系')
+    }
+    throw error
+  }
+}
+
 const activeStatuses = new Set<ActiveStatus>(['active', 'inactive', 'archived'])
 const crewRoles = new Set<CrewMemberRole>(['leader', 'operator', 'support'])
 const secondmentStatuses = new Set<SecondmentStatus>([
@@ -38,6 +211,48 @@ const secondmentStatuses = new Set<SecondmentStatus>([
   'completed',
   'cancelled',
 ])
+
+interface HandoverProfileRow {
+  id: string
+  name: string
+  factory_id: string
+  site_id: string
+  shift_template_id: string
+  assignment_mode: 'roster_first' | 'manual'
+  handover_required: number
+  early_start_minutes: number
+  late_end_minutes: number
+  instruction: string
+  status: ActiveStatus
+  revision: number
+  created_at: string
+  created_by: string | null
+  updated_at: string
+  updated_by: string | null
+  crew_ids: string
+}
+
+function mapHandoverProfile(row: HandoverProfileRow): HandoverShiftProfile {
+  return {
+    id: row.id,
+    name: row.name,
+    factoryId: row.factory_id,
+    siteId: row.site_id,
+    shiftTemplateId: row.shift_template_id,
+    crewIds: JSON.parse(row.crew_ids) as string[],
+    assignmentMode: row.assignment_mode,
+    handoverRequired: row.handover_required === 1,
+    earlyStartMinutes: row.early_start_minutes,
+    lateEndMinutes: row.late_end_minutes,
+    instruction: row.instruction,
+    status: row.status,
+    revision: row.revision,
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  }
+}
 
 function pageResult<T>(items: T[], query: PageQuery): PagedResult<T> {
   return {
@@ -74,7 +289,10 @@ function contains(value: string, query: string): boolean {
 }
 
 export function accessibleBaseIds(auth: AuthContext): Set<string> | null {
-  if (auth.grants.some((grant) => grant.type === 'group')) return null
+  const selectedBase = scopedBaseId(auth)
+  if (auth.grants.some((grant) => grant.type === 'group')) {
+    return selectedBase === null ? null : new Set([selectedBase])
+  }
 
   const ids = new Set<string>()
   for (const grant of auth.grants) {
@@ -83,33 +301,90 @@ export function accessibleBaseIds(auth: AuthContext): Set<string> | null {
         .forEach((row) => ids.add(row.id))
     } else if (grant.type === 'base') {
       ids.add(grant.id)
+    } else if (grant.type === 'factory') {
+      const row = one<{ base_id: string }>('SELECT base_id FROM factories WHERE id = ?', [grant.id])
+      if (row) ids.add(row.base_id)
     } else if (grant.type === 'work_area') {
       const row = one<{ base_id: string }>('SELECT base_id FROM work_areas WHERE id = ?', [grant.id])
       if (row) ids.add(row.base_id)
     }
   }
-  return ids
+  return selectedBase === null ? ids : new Set([...ids].filter((id) => id === selectedBase))
+}
+
+/**
+ * A factory grant is narrower than the base it belongs to. Keep that distinction
+ * in every read model so a single-mill administrator cannot see sibling mills.
+ */
+export function accessibleFactoryIds(auth: AuthContext): Set<string> | null {
+  const selectedBase = scopedBaseId(auth)
+  if (auth.grants.some((grant) => grant.type === 'group')) {
+    if (selectedBase === null) return null
+    return new Set(all<IdRow>('SELECT id FROM factories WHERE base_id = ?', [selectedBase]).map((row) => row.id))
+  }
+
+  const ids = new Set<string>()
+  for (const grant of auth.grants) {
+    if (grant.type === 'company') {
+      all<IdRow>(
+        `SELECT f.id FROM factories f
+         JOIN production_bases b ON b.id = f.base_id
+         WHERE b.company_id = ?`,
+        [grant.id],
+      ).forEach((row) => ids.add(row.id))
+    } else if (grant.type === 'base') {
+      all<IdRow>('SELECT id FROM factories WHERE base_id = ?', [grant.id])
+        .forEach((row) => ids.add(row.id))
+    } else if (grant.type === 'factory') {
+      ids.add(grant.id)
+    }
+  }
+  if (selectedBase === null) return ids
+  return new Set(all<IdRow>('SELECT id FROM factories WHERE base_id = ?', [selectedBase])
+    .map((row) => row.id)
+    .filter((id) => ids.has(id)))
+}
+
+function canAccessFactory(
+  auth: AuthContext,
+  capability: Capability,
+  baseId: string,
+  factoryId: string | null | undefined,
+): boolean {
+  return hasGrant(auth, capability, {
+    type: factoryId ? 'factory' : 'base',
+    id: factoryId || baseId,
+  })
+}
+
+function requireFactoryCapability(
+  auth: AuthContext,
+  capability: Capability,
+  baseId: string,
+  factoryId: string | null | undefined,
+): void {
+  requireScopedBase(auth, baseId)
+  if (!canAccessFactory(auth, capability, baseId, factoryId)) throw AppError.forbidden()
 }
 
 function canAccessBase(auth: AuthContext, capability: Capability, baseId: string): boolean {
-  const scope = { type: 'base' as const, id: baseId }
   return auth.grants.some((grant) => {
     if (grant.capability !== capability) return false
     if (grant.type === 'group') return true
     if (grant.type === 'base') return grant.id === baseId
+    if (grant.type === 'factory') return false
     if (grant.type === 'company') {
       const base = one<{ company_id: string }>('SELECT company_id FROM production_bases WHERE id = ?', [baseId])
       return base?.company_id === grant.id
     }
-    if (grant.type === 'work_area') {
-      const area = one<{ base_id: string }>('SELECT base_id FROM work_areas WHERE id = ?', [grant.id])
-      return area?.base_id === baseId
-    }
-    return scope.id === grant.id
+    // An area grant never authorizes changes to the containing base.
+    if (grant.type === 'work_area') return false
+    return false
   })
 }
 
 function requireBaseCapability(auth: AuthContext, capability: Capability, baseId: string): void {
+  requireScopedBase(auth, baseId)
   if (!canAccessBase(auth, capability, baseId)) throw AppError.forbidden()
 }
 
@@ -122,19 +397,51 @@ function requireGroupCapability(auth: AuthContext, capability: Capability): void
 
 function accessibleBases(auth: AuthContext): ProductionBase[] {
   const visible = accessibleBaseIds(auth)
+  const visibleFactories = accessibleFactoryIds(auth)
   return all<ProductionBase>(
-    `SELECT id, code, name, company_id AS companyId, address, status, revision,
+    `SELECT id, code, name, company_id AS companyId, address, site_confirmed AS siteConfirmed, status, revision,
             created_at AS createdAt, created_by AS createdBy,
             updated_at AS updatedAt, updated_by AS updatedBy
        FROM production_bases
       ORDER BY name`,
-  ).filter((base) => visible === null || visible.has(base.id))
+  ).map((base) => ({ ...base, siteConfirmed: Boolean(base.siteConfirmed) })).filter((base) =>
+    (visible === null || visible.has(base.id))
+    && (
+      visibleFactories === null
+      || all<IdRow>('SELECT id FROM factories WHERE base_id = ?', [base.id])
+        .some((factory) => visibleFactories.has(factory.id))
+    ),
+  )
+}
+
+export function listShiftTemplates(auth: AuthContext, query: PageQuery): PagedResult<ShiftTemplate> {
+  const visible = accessibleBaseIds(auth)
+  const visibleFactories = accessibleFactoryIds(auth)
+  const rows = all<ShiftTemplate>(
+    `SELECT id, code, name, base_id AS baseId, start_time AS startTime,
+            end_time AS endTime, cross_day AS crossDay, revision,
+            created_at AS createdAt, created_by AS createdBy,
+            updated_at AS updatedAt, updated_by AS updatedBy
+       FROM shift_templates
+      WHERE status = 'active'
+      ORDER BY base_id, start_time, name`,
+  ).filter((row) =>
+    (visible === null || visible.has(row.baseId))
+    && (
+      visibleFactories === null
+      || all<IdRow>('SELECT id FROM factories WHERE base_id = ?', [row.baseId])
+        .some((factory) => visibleFactories.has(factory.id))
+    )
+    && (!query.siteId || row.baseId === query.siteId)
+    && (!query.q || contains(row.name, query.q) || contains(row.code, query.q)),
+  ).map((row) => ({ ...row, crossDay: Boolean(row.crossDay) }))
+  return pageResult(rows, query)
 }
 
 function getBase(id: string): ProductionBase {
-  return requireRow(
+  const row = requireRow(
     one<ProductionBase>(
-      `SELECT id, code, name, company_id AS companyId, address, status, revision,
+      `SELECT id, code, name, company_id AS companyId, address, site_confirmed AS siteConfirmed, status, revision,
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
          FROM production_bases WHERE id = ?`,
@@ -142,6 +449,7 @@ function getBase(id: string): ProductionBase {
     ),
     '作业基地',
   )
+  return { ...row, siteConfirmed: Boolean(row.siteConfirmed) }
 }
 
 function getCompany(id: string): Company {
@@ -161,7 +469,7 @@ function getCompany(id: string): Company {
 function getArea(id: string): WorkArea {
   return requireRow(
     one<WorkArea>(
-      `SELECT id, code, name, base_id AS baseId, parent_id AS parentId,
+      `SELECT id, code, name, base_id AS baseId, factory_id AS factoryId, parent_id AS parentId,
               manager_person_id AS managerPersonId, status, revision,
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
@@ -185,11 +493,29 @@ function getLine(id: string): ProductionLine {
   )
 }
 
-function getCrew(id: string): Crew {
+function getFactory(id: string): Factory {
   return requireRow(
-    one<Crew>(
-      `SELECT id, code, name, base_id AS baseId, work_area_id AS workAreaId,
-              leader_person_id AS leaderPersonId, status, revision,
+    one<Factory>(
+      `SELECT id, code, name, company_id AS companyId, base_id AS baseId, management_group_id AS managementGroupId,
+              factory_type AS factoryType, manager_person_id AS managerPersonId,
+              address, sort_order AS sortOrder, status, revision,
+              created_at AS createdAt, created_by AS createdBy,
+              updated_at AS updatedAt, updated_by AS updatedBy
+         FROM factories WHERE id = ?`,
+      [id],
+    ),
+    '饲料厂',
+  )
+}
+
+function getCrew(id: string): Crew {
+  const row = requireRow(
+    one<CrewRow>(
+      `SELECT id, code, name, base_id AS baseId, work_area_id AS workAreaId, factory_id AS factoryId,
+              (SELECT cm.person_id FROM crew_memberships cm WHERE cm.crew_id = crews.id AND cm.role = 'leader'
+                 AND cm.valid_from <= date('now','localtime') AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime')) ORDER BY cm.valid_from, cm.id LIMIT 1) AS leaderPersonId, status, revision,
+              ${crewDerivedColumns},
+              ${crewLeaderNamesColumn},
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
          FROM crews WHERE id = ?`,
@@ -197,20 +523,11 @@ function getCrew(id: string): Crew {
     ),
     '班组',
   )
+  return mapCrewRow(row)
 }
 
 function getPerson(id: string): Person {
-  const row = requireRow(
-    one<Omit<Person, 'qualifications'>>(
-      `SELECT id, employee_code AS employeeCode, name, mobile,
-              home_company_id AS homeCompanyId, home_base_id AS homeBaseId,
-              status, revision, created_at AS createdAt, created_by AS createdBy,
-              updated_at AS updatedAt, updated_by AS updatedBy
-         FROM people WHERE id = ?`,
-      [id],
-    ),
-    '人员',
-  )
+  const row = personRow(id)
   const qualifications = all<PersonQualification & {
     qualificationName: string
     qualificationCode: string
@@ -227,7 +544,22 @@ function getPerson(id: string): Person {
       ORDER BY q.name, pq.valid_from DESC`,
     [id],
   )
-  return { ...row, qualifications }
+  return { ...row, qualifications, crew: currentCrewSummary(id) }
+}
+
+/** Bare people row without derived summaries, used by write paths. */
+function personRow(id: string): Omit<Person, 'qualifications' | 'crew'> {
+  return requireRow(
+    one<Omit<Person, 'qualifications' | 'crew'>>(
+      `SELECT id, employee_code AS employeeCode, name, mobile,
+              home_company_id AS homeCompanyId, home_base_id AS homeBaseId, factory_id AS factoryId,
+              status, revision, created_at AS createdAt, created_by AS createdBy,
+              updated_at AS updatedAt, updated_by AS updatedBy
+         FROM people WHERE id = ?`,
+      [id],
+    ),
+    '人员',
+  )
 }
 
 function getSecondment(id: string): Secondment {
@@ -235,7 +567,7 @@ function getSecondment(id: string): Secondment {
     one<Secondment>(
       `SELECT id, person_id AS personId, from_company_id AS fromCompanyId,
               from_base_id AS fromBaseId, to_company_id AS toCompanyId,
-              to_base_id AS toBaseId, start_date AS startDate, end_date AS endDate,
+              to_base_id AS toBaseId, to_factory_id AS toFactoryId, start_date AS startDate, end_date AS endDate,
               purpose, status, approved_by AS approvedBy, revision,
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
@@ -264,6 +596,7 @@ function audit(
     scopeId: scope.id,
     before,
     after,
+    ipAddress: auth.ipAddress,
   })
 }
 
@@ -303,7 +636,7 @@ export function createCompany(
   assertActiveStatus(input.status)
   if (input.isGroup) {
     const group = one<IdRow>('SELECT id FROM companies WHERE is_group = 1')
-    if (group) throw AppError.conflict('当前系统只允许一个集团根公司')
+    if (group) throw AppError.conflict('当前系统只允许一个饲料总部根公司')
   }
   const id = newId('company')
   const ts = nowIso()
@@ -329,7 +662,7 @@ export function updateCompany(
   const before = getCompany(id)
   assertRevision(before, input.revision, '公司')
   if (input.status) assertActiveStatus(input.status)
-  if (before.isGroup && input.status === 'archived') throw AppError.conflict('集团根公司不能归档')
+  if (before.isGroup && input.status === 'archived') throw AppError.conflict('饲料总部根公司不能归档')
   run(
     `UPDATE companies SET code = ?, name = ?, short_name = ?, payroll_enabled = ?,
        status = ?, revision = revision + 1, updated_at = ?, updated_by = ?
@@ -345,7 +678,7 @@ export function updateCompany(
 
 export function archiveCompany(auth: AuthContext, id: string, revision: number): void {
   const before = getCompany(id)
-  if (before.isGroup) throw AppError.conflict('集团根公司不能归档')
+  if (before.isGroup) throw AppError.conflict('饲料总部根公司不能归档')
   const reference = one<IdRow>('SELECT id FROM production_bases WHERE company_id = ? LIMIT 1', [id])
     ?? one<IdRow>('SELECT id FROM people WHERE home_company_id = ? LIMIT 1', [id])
   if (reference) throw AppError.referenceConflict('公司仍被基地或人员引用')
@@ -375,9 +708,9 @@ export function createBase(
   const ts = nowIso()
   run(
     `INSERT INTO production_bases
-      (id, code, name, company_id, address, status, revision,
+      (id, code, name, company_id, address, status, site_confirmed, revision,
        created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)`,
     [id, input.code, input.name, input.companyId, input.address, input.status,
       ts, auth.accountId, ts, auth.accountId],
   )
@@ -389,19 +722,26 @@ export function createBase(
 export function updateBase(
   auth: AuthContext,
   id: string,
-  input: Partial<Pick<ProductionBase, 'code' | 'name' | 'companyId' | 'address' | 'status' | 'revision'>>,
+  input: Partial<Pick<ProductionBase, 'code' | 'name' | 'companyId' | 'address' | 'siteConfirmed' | 'status' | 'revision'>>,
 ): ProductionBase {
   requireBaseCapability(auth, 'org.manage', id)
   const before = getBase(id)
   assertRevision(before, input.revision, '作业基地')
+  if (input.siteConfirmed !== undefined && input.siteConfirmed !== before.siteConfirmed) requireGroupCapability(auth, 'org.manage')
+  if (input.companyId && input.companyId !== before.companyId && (
+    one<IdRow>('SELECT id FROM factories WHERE base_id = ? LIMIT 1', [id])
+    || one<IdRow>('SELECT id FROM people WHERE home_base_id = ? LIMIT 1', [id])
+    || one<IdRow>('SELECT id FROM tickets WHERE site_id = ? LIMIT 1', [id])
+    || one<IdRow>('SELECT id FROM price_rule_versions WHERE site_id = ? LIMIT 1', [id])
+  )) throw AppError.referenceConflict('基地已有工厂、人员、工单或计价，不能直接变更公司')
   if (input.companyId) getCompany(input.companyId)
   if (input.status) assertActiveStatus(input.status)
   run(
-    `UPDATE production_bases SET code = ?, name = ?, company_id = ?, address = ?,
+    `UPDATE production_bases SET code = ?, name = ?, company_id = ?, address = ?, site_confirmed = ?,
        status = ?, revision = revision + 1, updated_at = ?, updated_by = ?
      WHERE id = ? AND revision = ?`,
     [input.code ?? before.code, input.name ?? before.name, input.companyId ?? before.companyId,
-      input.address ?? before.address, input.status ?? before.status, nowIso(), auth.accountId,
+      input.address ?? before.address, Number(input.siteConfirmed ?? before.siteConfirmed), input.status ?? before.status, nowIso(), auth.accountId,
       id, before.revision],
   )
   const updated = getBase(id)
@@ -414,27 +754,146 @@ export function archiveBase(auth: AuthContext, id: string, revision: number): vo
   const before = getBase(id)
   assertRevision(before, revision, '作业基地')
   const reference =
-    one<IdRow>(`SELECT id FROM work_areas WHERE base_id = ? AND status <> 'archived' LIMIT 1`, [id])
+    one<IdRow>(`SELECT id FROM factories WHERE base_id = ? AND status <> 'archived' LIMIT 1`, [id])
+    ?? one<IdRow>(`SELECT id FROM work_areas WHERE base_id = ? AND status <> 'archived' LIMIT 1`, [id])
     ?? one<IdRow>(`SELECT id FROM production_lines WHERE base_id = ? AND status <> 'archived' LIMIT 1`, [id])
     ?? one<IdRow>(`SELECT id FROM crews WHERE base_id = ? AND status <> 'archived' LIMIT 1`, [id])
     ?? one<IdRow>(`SELECT id FROM secondments WHERE to_base_id = ? AND status IN ('planned', 'active') LIMIT 1`, [id])
-  if (reference) throw AppError.referenceConflict('基地仍被工区、产线、班组或借调引用')
+  if (reference) throw AppError.referenceConflict('基地仍被工厂、工区、产线、班组或借调引用')
   updateBase(auth, id, { revision, status: 'archived' })
+}
+
+export function listFactories(auth: AuthContext, query: PageQuery): PagedResult<Factory> {
+  const visible = accessibleBaseIds(auth)
+  const visibleFactories = accessibleFactoryIds(auth)
+  const rows = all<Factory>(
+    `SELECT id, code, name, company_id AS companyId, base_id AS baseId, management_group_id AS managementGroupId,
+            factory_type AS factoryType, manager_person_id AS managerPersonId,
+            address, sort_order AS sortOrder, status, revision,
+            created_at AS createdAt, created_by AS createdBy,
+            updated_at AS updatedAt, updated_by AS updatedBy
+       FROM factories ORDER BY sort_order, name`,
+  ).filter((row) =>
+    (visible === null || visible.has(row.baseId))
+    && (visibleFactories === null || visibleFactories.has(row.id))
+    && (!query.companyId || row.companyId === query.companyId)
+    && (!query.siteId || row.baseId === query.siteId)
+    && (!query.status || row.status === query.status)
+    && (!query.q || contains(row.name, query.q) || contains(row.code, query.q)),
+  )
+  return pageResult(rows, query)
+}
+
+export function createFactory(
+  auth: AuthContext,
+  input: Pick<Factory, 'code' | 'name' | 'companyId' | 'baseId' | 'managementGroupId' | 'factoryType'
+    | 'managerPersonId' | 'address' | 'sortOrder' | 'status'>,
+): Factory {
+  requireBaseCapability(auth, 'org.manage', input.baseId)
+  const base = getBase(input.baseId)
+  if (base.companyId !== input.companyId) throw AppError.badRequest('工厂所属公司与基地不一致')
+  if (input.managementGroupId && !one<IdRow>('SELECT id FROM management_groups WHERE id = ? AND status = ?', [input.managementGroupId, 'active'])) throw AppError.badRequest('管理分组不存在或未启用')
+  if (input.managerPersonId) personRow(input.managerPersonId)
+  if (input.status) assertActiveStatus(input.status)
+  const id = newId('factory')
+  const ts = nowIso()
+  run(
+    `INSERT INTO factories
+      (id, code, name, company_id, base_id, management_group_id, factory_type, manager_person_id,
+       address, sort_order, status, revision, created_at, created_by, updated_at, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [id, input.code, input.name, input.companyId, input.baseId, input.managementGroupId, input.factoryType,
+      input.managerPersonId, input.address, input.sortOrder, input.status,
+      ts, auth.accountId, ts, auth.accountId],
+  )
+  const created = getFactory(id)
+  audit(auth, 'org.factory.create', 'factory', id, { type: 'base', id: input.baseId }, undefined, created)
+  return created
+}
+
+export function updateFactory(
+  auth: AuthContext,
+  id: string,
+  input: Partial<Pick<Factory, 'code' | 'name' | 'baseId' | 'managementGroupId' | 'factoryType'
+    | 'managerPersonId' | 'address' | 'sortOrder' | 'status' | 'revision'>>,
+): Factory {
+  const before = getFactory(id)
+  requireFactoryCapability(auth, 'org.manage', before.baseId, before.id)
+  assertRevision(before, input.revision, '饲料厂')
+  const baseId = input.baseId ?? before.baseId
+  if (baseId !== before.baseId) {
+    throw AppError.badRequest('饲料厂不能直接迁移到其他基地，请归档后重新创建')
+  }
+  const base = getBase(baseId)
+  const managementGroupId = input.managementGroupId === undefined ? before.managementGroupId : input.managementGroupId
+  if (managementGroupId && !one<IdRow>('SELECT id FROM management_groups WHERE id = ? AND status = ?', [managementGroupId, 'active'])) throw AppError.badRequest('管理分组不存在或未启用')
+  if (input.managerPersonId) personRow(input.managerPersonId)
+  if (input.status) assertActiveStatus(input.status)
+  run(
+    `UPDATE factories SET code = ?, name = ?, company_id = ?, base_id = ?, management_group_id = ?, factory_type = ?,
+       manager_person_id = ?, address = ?, sort_order = ?, status = ?,
+       revision = revision + 1, updated_at = ?, updated_by = ?
+     WHERE id = ? AND revision = ?`,
+    [input.code ?? before.code, input.name ?? before.name, base.companyId, baseId, managementGroupId,
+      input.factoryType ?? before.factoryType,
+      input.managerPersonId === undefined ? before.managerPersonId : input.managerPersonId,
+      input.address ?? before.address, input.sortOrder ?? before.sortOrder,
+      input.status ?? before.status, nowIso(), auth.accountId, id, before.revision],
+  )
+  const updated = getFactory(id)
+  audit(auth, 'org.factory.update', 'factory', id, { type: 'base', id: before.baseId }, before, updated)
+  return updated
+}
+
+export function archiveFactory(auth: AuthContext, id: string, revision: number): void {
+  const before = getFactory(id)
+  requireFactoryCapability(auth, 'org.manage', before.baseId, before.id)
+  assertRevision(before, revision, '饲料厂')
+  const reference =
+    one<IdRow>(`SELECT id FROM crews WHERE factory_id = ? AND status <> 'archived' LIMIT 1`, [id])
+    ?? one<IdRow>(`SELECT id FROM people WHERE factory_id = ? AND status <> 'archived' LIMIT 1`, [id])
+    ?? one<IdRow>(`SELECT id FROM handover_shift_profiles WHERE factory_id = ? AND status <> 'archived' LIMIT 1`, [id])
+  if (reference) throw AppError.referenceConflict('饲料厂仍被生产班、人员或交接班配置引用')
+  updateFactory(auth, id, { revision, status: 'archived' })
+}
+
+export function listHandoverShiftProfiles(auth: AuthContext): HandoverShiftProfile[] {
+  const visible = accessibleBaseIds(auth)
+  const visibleFactories = accessibleFactoryIds(auth)
+  return all<HandoverProfileRow>(
+    `SELECT hp.id, hp.name, hp.factory_id, f.base_id AS site_id,
+            hp.shift_template_id, hp.assignment_mode, hp.handover_required,
+            hp.early_start_minutes, hp.late_end_minutes, hp.instruction, hp.status,
+            hp.revision, hp.created_at, hp.created_by, hp.updated_at, hp.updated_by,
+            COALESCE(json_group_array(hpc.crew_id), '[]') AS crew_ids
+       FROM handover_shift_profiles hp
+       JOIN factories f ON f.id = hp.factory_id
+       LEFT JOIN handover_shift_profile_crews hpc ON hpc.profile_id = hp.id
+      WHERE hp.status = 'active'
+      GROUP BY hp.id
+      ORDER BY f.sort_order, f.name, hp.name`,
+  )
+    .filter((row) =>
+      (visible === null || visible.has(row.site_id))
+      && (visibleFactories === null || visibleFactories.has(row.factory_id)),
+    )
+    .map(mapHandoverProfile)
 }
 
 export function listWorkAreas(
   auth: AuthContext,
   query: PageQuery,
 ): PagedResult<WorkArea> {
-  const visible = accessibleBaseIds(auth)
   const rows = all<WorkArea>(
-    `SELECT id, code, name, base_id AS baseId, parent_id AS parentId,
+    `SELECT id, code, name, base_id AS baseId, factory_id AS factoryId, parent_id AS parentId,
             manager_person_id AS managerPersonId, status, revision,
             created_at AS createdAt, created_by AS createdBy,
             updated_at AS updatedAt, updated_by AS updatedBy
        FROM work_areas ORDER BY name`,
   ).filter((row) =>
-    (visible === null || visible.has(row.baseId))
+    withinScopedBase(auth, row.baseId)
+    &&
+    (hasGrant(auth, 'org.view', { type: 'work_area', id: row.id }) || canAccessFactory(auth, 'org.view', row.baseId, row.factoryId))
     && (!query.siteId || row.baseId === query.siteId)
     && (!query.workAreaId || row.id === query.workAreaId)
     && (!query.status || row.status === query.status)
@@ -445,23 +904,27 @@ export function listWorkAreas(
 
 export function createArea(
   auth: AuthContext,
-  input: Pick<WorkArea, 'code' | 'name' | 'baseId' | 'parentId' | 'managerPersonId' | 'status'>,
+  input: Pick<WorkArea, 'code' | 'name' | 'baseId' | 'factoryId' | 'parentId' | 'managerPersonId' | 'status'>,
 ): WorkArea {
-  requireBaseCapability(auth, 'org.manage', input.baseId)
+  if (!input.factoryId) throw AppError.badRequest('工区必须关联工厂')
+  requireFactoryCapability(auth, 'org.manage', input.baseId, input.factoryId)
+  const factory = getFactory(input.factoryId)
+  if (factory.baseId !== input.baseId || factory.status !== 'active') throw AppError.badRequest('工区所属工厂必须属于同一基地且处于启用状态')
   if (input.parentId) {
     const parent = getArea(input.parentId)
-    if (parent.baseId !== input.baseId) throw AppError.badRequest('上级工区必须属于同一基地')
+    if (parent.status !== 'active') throw AppError.badRequest('上级位置未启用')
+    if (parent.baseId !== input.baseId || parent.factoryId !== input.factoryId) throw AppError.badRequest('上级工区必须属于同一工厂')
   }
-  if (input.managerPersonId) getPerson(input.managerPersonId)
+  if (input.managerPersonId) personRow(input.managerPersonId)
   if (input.status) assertActiveStatus(input.status)
   const id = newId('area')
   const ts = nowIso()
   run(
     `INSERT INTO work_areas
-      (id, code, name, base_id, parent_id, manager_person_id, status, revision,
+      (id, code, name, base_id, factory_id, parent_id, manager_person_id, status, revision,
        created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-    [id, input.code, input.name, input.baseId, input.parentId, input.managerPersonId,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [id, input.code, input.name, input.baseId, input.factoryId, input.parentId, input.managerPersonId,
       input.status, ts, auth.accountId, ts, auth.accountId],
   )
   const created = getArea(id)
@@ -472,28 +935,36 @@ export function createArea(
 export function updateArea(
   auth: AuthContext,
   id: string,
-  input: Partial<Pick<WorkArea, 'code' | 'name' | 'parentId' | 'managerPersonId' | 'status' | 'revision'>>,
+  input: Partial<Pick<WorkArea, 'code' | 'name' | 'factoryId' | 'parentId' | 'managerPersonId' | 'status' | 'revision'>>,
 ): WorkArea {
   const before = getArea(id)
-  requireBaseCapability(auth, 'org.manage', before.baseId)
+  requireFactoryCapability(auth, 'org.manage', before.baseId, before.factoryId)
   assertRevision(before, input.revision, '工区')
+  const factoryId = input.factoryId === undefined ? before.factoryId : input.factoryId
+  if (!factoryId) throw AppError.badRequest('工区必须关联工厂')
+  requireFactoryCapability(auth, 'org.manage', before.baseId, factoryId)
+  const factory = getFactory(factoryId)
+  if (factory.baseId !== before.baseId || factory.status !== 'active') throw AppError.badRequest('工区所属工厂必须属于同一基地且处于启用状态')
+  if (before.factoryId && before.factoryId !== factoryId) throw AppError.badRequest('已有工厂的工区不能转移到其他工厂')
   const parentId = input.parentId === undefined ? before.parentId : input.parentId
   if (parentId === id) throw AppError.badRequest('工区不能把自己设为上级')
   if (parentId) {
     const parent = getArea(parentId)
-    if (parent.baseId !== before.baseId) throw AppError.badRequest('上级工区必须属于同一基地')
+    if (parent.status !== 'active') throw AppError.badRequest('上级位置未启用')
+    if (parent.baseId !== before.baseId || parent.factoryId !== factoryId) throw AppError.badRequest('上级工区必须属于同一工厂')
     if (isAreaDescendant(parentId, id)) throw AppError.badRequest('不能把下级工区设为上级')
   }
-  if (input.managerPersonId) getPerson(input.managerPersonId)
+  if (input.managerPersonId) personRow(input.managerPersonId)
   if (input.status) assertActiveStatus(input.status)
   run(
-    `UPDATE work_areas SET code = ?, name = ?, parent_id = ?, manager_person_id = ?,
+    `UPDATE work_areas SET code = ?, name = ?, factory_id = ?, parent_id = ?, manager_person_id = ?,
        status = ?, revision = revision + 1, updated_at = ?, updated_by = ?
      WHERE id = ? AND revision = ?`,
-    [input.code ?? before.code, input.name ?? before.name, parentId,
+    [input.code ?? before.code, input.name ?? before.name, factoryId, parentId,
       input.managerPersonId === undefined ? before.managerPersonId : input.managerPersonId,
       input.status ?? before.status, nowIso(), auth.accountId, id, before.revision],
   )
+  run('UPDATE production_lines SET name=?,work_area_id=COALESCE(?,work_area_id),status=?,revision=revision+1,updated_at=? WHERE id=?', [input.name ?? before.name,parentId,input.status ?? before.status,nowIso(),id])
   const updated = getArea(id)
   audit(auth, 'org.area.update', 'work_area', id, { type: 'base', id: before.baseId }, before, updated)
   return updated
@@ -501,7 +972,7 @@ export function updateArea(
 
 export function archiveArea(auth: AuthContext, id: string, revision: number): void {
   const before = getArea(id)
-  requireBaseCapability(auth, 'org.manage', before.baseId)
+  requireFactoryCapability(auth, 'org.manage', before.baseId, before.factoryId)
   if (
     one<IdRow>('SELECT id FROM work_areas WHERE parent_id = ? AND status <> ? LIMIT 1', [id, 'archived'])
     ?? one<IdRow>('SELECT id FROM production_lines WHERE work_area_id = ? AND status <> ? LIMIT 1', [id, 'archived'])
@@ -522,7 +993,6 @@ function isAreaDescendant(areaId: string, ancestorId: string): boolean {
 }
 
 export function listLines(auth: AuthContext, query: PageQuery): PagedResult<ProductionLine> {
-  const visible = accessibleBaseIds(auth)
   return pageResult(
     all<ProductionLine>(
       `SELECT id, code, name, base_id AS baseId, work_area_id AS workAreaId,
@@ -530,7 +1000,8 @@ export function listLines(auth: AuthContext, query: PageQuery): PagedResult<Prod
               updated_at AS updatedAt, updated_by AS updatedBy
          FROM production_lines ORDER BY name`,
     ).filter((row) =>
-      (visible === null || visible.has(row.baseId))
+      withinScopedBase(auth, row.baseId)
+      && hasGrant(auth, 'org.view', { type: 'work_area', id: row.workAreaId })
       && (!query.siteId || row.baseId === query.siteId)
       && (!query.workAreaId || row.workAreaId === query.workAreaId)
       && (!query.status || row.status === query.status)
@@ -544,8 +1015,9 @@ export function createLine(
   auth: AuthContext,
   input: Pick<ProductionLine, 'code' | 'name' | 'baseId' | 'workAreaId' | 'status'>,
 ): ProductionLine {
-  requireBaseCapability(auth, 'org.manage', input.baseId)
   const area = getArea(input.workAreaId)
+  requireFactoryCapability(auth, 'org.manage', area.baseId, area.factoryId)
+  if (!area.factoryId) throw AppError.badRequest('产线所属工区须先确认工厂')
   if (area.baseId !== input.baseId) throw AppError.badRequest('产线所属工区必须属于同一基地')
   if (input.status) assertActiveStatus(input.status)
   const id = newId('line')
@@ -558,6 +1030,7 @@ export function createLine(
     [id, input.code, input.name, input.baseId, input.workAreaId, input.status,
       ts, auth.accountId, ts, auth.accountId],
   )
+  run(`INSERT INTO work_areas(id,code,name,base_id,factory_id,parent_id,status,revision,created_at,created_by,updated_at,updated_by) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)`,[id,'LOC-'+input.code,input.name,input.baseId,area.factoryId,input.workAreaId,input.status,ts,auth.accountId,ts,auth.accountId])
   const created = getLine(id)
   audit(auth, 'org.line.create', 'production_line', id, { type: 'base', id: input.baseId }, undefined, created)
   return created
@@ -569,10 +1042,13 @@ export function updateLine(
   input: Partial<Pick<ProductionLine, 'code' | 'name' | 'workAreaId' | 'status' | 'revision'>>,
 ): ProductionLine {
   const before = getLine(id)
-  requireBaseCapability(auth, 'org.manage', before.baseId)
+  const oldArea = getArea(before.workAreaId)
+  requireFactoryCapability(auth, 'org.manage', oldArea.baseId, oldArea.factoryId)
   assertRevision(before, input.revision, '产线')
   const workAreaId = input.workAreaId ?? before.workAreaId
-  if (getArea(workAreaId).baseId !== before.baseId) throw AppError.badRequest('产线所属工区必须属于同一基地')
+  const newArea = getArea(workAreaId)
+  if(workAreaId === id || isAreaDescendant(workAreaId,id)) throw AppError.badRequest('不能将自身或下级位置设为上级')
+  if (!newArea.factoryId || newArea.baseId !== before.baseId || newArea.factoryId !== oldArea.factoryId) throw AppError.badRequest('产线所属工区必须属于同一工厂')
   if (input.status) assertActiveStatus(input.status)
   run(
     `UPDATE production_lines SET code = ?, name = ?, work_area_id = ?, status = ?,
@@ -580,6 +1056,7 @@ export function updateLine(
     [input.code ?? before.code, input.name ?? before.name, workAreaId,
       input.status ?? before.status, nowIso(), auth.accountId, id, before.revision],
   )
+  run('UPDATE work_areas SET name=?,parent_id=?,status=?,revision=revision+1,updated_at=? WHERE id=?',[input.name ?? before.name,workAreaId,input.status ?? before.status,nowIso(),id])
   const updated = getLine(id)
   audit(auth, 'org.line.update', 'production_line', id, { type: 'base', id: before.baseId }, before, updated)
   return updated
@@ -682,22 +1159,56 @@ export function archiveQualification(auth: AuthContext, id: string, revision: nu
 
 export function listPeople(auth: AuthContext, query: PageQuery): PagedResult<Person> {
   const visible = accessibleBaseIds(auth)
-  const baseIds = visible === null
-    ? all<IdRow>('SELECT id FROM production_bases')
-        .filter((row) => canAccessBase(auth, 'person.view', row.id))
-        .map((row) => row.id)
-    : [...visible].filter((id) => canAccessBase(auth, 'person.view', id))
-  const ids = all<IdRow>(
-    `SELECT id FROM people ORDER BY employee_code`,
-  ).filter((row) => {
-    const person = one<{ home_base_id: string }>('SELECT home_base_id FROM people WHERE id = ?', [row.id])
-    return person && baseIds.includes(person.home_base_id)
-  }).map((row) => row.id)
-  const items = ids
-    .map(getPerson)
+  const personIds = new Set<string>()
+  const visibleFactories = accessibleFactoryIds(auth)
+  if (visible === null && visibleFactories === null) {
+    all<IdRow>('SELECT id FROM people').forEach((row) => personIds.add(row.id))
+  } else if (visible && visibleFactories === null) {
+    for (const id of visible) {
+      if (!canAccessBase(auth, 'person.view', id)) continue
+      all<IdRow>('SELECT id FROM people WHERE home_base_id = ?', [id])
+        .forEach((row) => personIds.add(row.id))
+    }
+  }
+  if (visibleFactories) {
+    for (const factoryId of visibleFactories) {
+      const factory = getFactory(factoryId)
+      if (!canAccessFactory(auth, 'person.view', factory.baseId, factory.id)) continue
+      all<IdRow>('SELECT id FROM people WHERE factory_id = ?', [factoryId])
+        .forEach((row) => personIds.add(row.id))
+    }
+  }
+  if (visibleFactories) {
+    for (const factoryId of visibleFactories) {
+      const factory = getFactory(factoryId)
+      if (!canAccessFactory(auth, 'person.view', factory.baseId, factory.id)) continue
+      all<IdRow>(`SELECT DISTINCT person_id AS id FROM secondments WHERE to_factory_id = ?
+        AND status IN ('planned', 'active') AND end_date >= date('now','localtime')`, [factoryId]).forEach((row) => personIds.add(row.id))
+    }
+  }
+  const ids = [...personIds]
+  // Read crew and qualification summaries in batches instead of per person.
+  const crews = crewSummariesFor(ids)
+  const qualifications = qualificationsFor(ids)
+  const rows = all<Omit<Person, 'qualifications' | 'crew'>>(
+    `SELECT id, employee_code AS employeeCode, name, mobile,
+            home_company_id AS homeCompanyId, home_base_id AS homeBaseId, factory_id AS factoryId,
+            status, revision, created_at AS createdAt, created_by AS createdBy,
+            updated_at AS updatedAt, updated_by AS updatedBy
+       FROM people ORDER BY employee_code`,
+  )
+  const items = rows
+    .filter((row) => personIds.has(row.id))
+    .map((row) => ({
+      ...row,
+      qualifications: qualifications.get(row.id) ?? [],
+      crew: crews.get(row.id) ?? null,
+    }))
     .filter((row) =>
       (!query.companyId || row.homeCompanyId === query.companyId)
       && (!query.siteId || row.homeBaseId === query.siteId)
+      && (!query.factoryId || row.factoryId === query.factoryId)
+      && (!query.crewId || row.crew?.crewId === query.crewId)
       && (!query.status || row.status === query.status)
       && (!query.q || contains(row.name, query.q) || contains(row.employeeCode, query.q)),
     )
@@ -706,21 +1217,26 @@ export function listPeople(auth: AuthContext, query: PageQuery): PagedResult<Per
 
 export function createPerson(
   auth: AuthContext,
-  input: Pick<Person, 'employeeCode' | 'name' | 'mobile' | 'homeCompanyId' | 'homeBaseId' | 'status'>,
+  input: Pick<Person, 'employeeCode' | 'name' | 'mobile' | 'homeCompanyId'
+    | 'homeBaseId' | 'factoryId' | 'status'>,
 ): Person {
-  requireBaseCapability(auth, 'person.manage', input.homeBaseId)
+  requireFactoryCapability(auth, 'person.manage', input.homeBaseId, input.factoryId)
   const base = getBase(input.homeBaseId)
   if (base.companyId !== input.homeCompanyId) throw AppError.badRequest('人员所属公司与归属基地不一致')
+  if (input.factoryId) {
+    const factory = getFactory(input.factoryId)
+    if (factory.baseId !== input.homeBaseId) throw AppError.badRequest('人员工厂必须属于归属基地')
+  }
   if (input.status) assertActiveStatus(input.status)
   const id = newId('person')
   const ts = nowIso()
   run(
     `INSERT INTO people
-      (id, employee_code, name, mobile, home_company_id, home_base_id, status, revision,
+      (id, employee_code, name, mobile, home_company_id, home_base_id, factory_id, status, revision,
        created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
     [id, input.employeeCode, input.name, input.mobile, input.homeCompanyId, input.homeBaseId,
-      input.status, ts, auth.accountId, ts, auth.accountId],
+      input.factoryId, input.status, ts, auth.accountId, ts, auth.accountId],
   )
   const created = getPerson(id)
   audit(auth, 'org.person.create', 'person', id, { type: 'base', id: input.homeBaseId }, undefined, created)
@@ -730,28 +1246,67 @@ export function createPerson(
 /** Single-person read used by GET /org/people/:id; keeps list and detail scopes consistent. */
 export function readPerson(auth: AuthContext, id: string): Person {
   const person = getPerson(id)
-  requireBaseCapability(auth, 'person.view', person.homeBaseId)
+  requireFactoryCapability(auth, 'person.view', person.homeBaseId, person.factoryId)
   return person
+}
+
+/**
+ * Read-only crew relations of one person, including future and ended ones.
+ * Crew names are hidden when the caller cannot view that crew.
+ */
+export function listPersonCrewRelations(auth: AuthContext, personId: string): PersonCrewHistory[] {
+  const person = personRow(personId)
+  requireFactoryCapability(auth, 'person.view', person.homeBaseId, person.factoryId)
+  const today = todayLocal()
+  return all<{ membershipId: string; crewId: string; crewName: string; role: CrewMemberRole; validFrom: string; validTo: string | null }>(
+    `SELECT cm.id AS membershipId, cm.crew_id AS crewId, c.name AS crewName, cm.role,
+            cm.valid_from AS validFrom, cm.valid_to AS validTo
+       FROM crew_memberships cm JOIN crews c ON c.id = cm.crew_id
+      WHERE cm.person_id = ? ORDER BY cm.valid_from, cm.id`,
+    [personId],
+  ).map((row) => {
+    const visible = canViewCrew(auth, row.crewId)
+    const relation: PersonCrewHistory['relation'] = row.validFrom > today
+      ? 'future'
+      : row.validTo && row.validTo < today ? 'ended' : 'current'
+    return {
+      membershipId: row.membershipId,
+      crewId: row.crewId,
+      crewName: visible ? row.crewName : '其他班组',
+      role: row.role,
+      validFrom: row.validFrom,
+      validTo: row.validTo,
+      relation,
+    }
+  })
 }
 
 export function updatePerson(
   auth: AuthContext,
   id: string,
-  input: Partial<Pick<Person, 'employeeCode' | 'name' | 'mobile' | 'homeCompanyId' | 'homeBaseId' | 'status' | 'revision'>>,
+  input: Partial<Pick<Person, 'employeeCode' | 'name' | 'mobile' | 'homeCompanyId'
+    | 'homeBaseId' | 'factoryId' | 'status' | 'revision'>>,
 ): Person {
   const before = getPerson(id)
-  requireBaseCapability(auth, 'person.manage', before.homeBaseId)
+  requireFactoryCapability(auth, 'person.manage', before.homeBaseId, before.factoryId)
   assertRevision(before, input.revision, '人员')
   const homeBaseId = input.homeBaseId ?? before.homeBaseId
   const homeCompanyId = input.homeCompanyId ?? before.homeCompanyId
   if (getBase(homeBaseId).companyId !== homeCompanyId) throw AppError.badRequest('人员所属公司与归属基地不一致')
+  const factoryId = input.factoryId === undefined ? before.factoryId : input.factoryId
+  requireFactoryCapability(auth, 'person.manage', homeBaseId, factoryId)
+  if (factoryId) {
+    const factory = getFactory(factoryId)
+    if (factory.baseId !== homeBaseId) throw AppError.badRequest('人员工厂必须属于归属基地')
+  }
   if (input.status) assertActiveStatus(input.status)
   run(
     `UPDATE people SET employee_code = ?, name = ?, mobile = ?, home_company_id = ?,
-       home_base_id = ?, status = ?, revision = revision + 1, updated_at = ?, updated_by = ?
+       home_base_id = ?, factory_id = ?, status = ?, revision = revision + 1,
+       updated_at = ?, updated_by = ?
      WHERE id = ? AND revision = ?`,
     [input.employeeCode ?? before.employeeCode, input.name ?? before.name,
-      input.mobile ?? before.mobile, homeCompanyId, homeBaseId,
+      input.mobile ?? before.mobile, homeCompanyId, homeBaseId, factoryId,
       input.status ?? before.status, nowIso(), auth.accountId, id, before.revision],
   )
   const updated = getPerson(id)
@@ -761,6 +1316,7 @@ export function updatePerson(
 
 export function archivePerson(auth: AuthContext, id: string, revision: number): void {
   const before = getPerson(id)
+  requireFactoryCapability(auth, 'person.manage', before.homeBaseId, before.factoryId)
   const activeMembership = one<IdRow>(
     `SELECT id FROM crew_memberships
       WHERE person_id = ? AND (valid_to IS NULL OR valid_to >= date('now')) LIMIT 1`,
@@ -783,7 +1339,7 @@ export function replacePersonQualifications(
   qualifications: Array<Pick<PersonQualification, 'qualificationId' | 'validFrom' | 'validTo' | 'certificateNo'>>,
 ): Person {
   const person = getPerson(personId)
-  requireBaseCapability(auth, 'person.manage', person.homeBaseId)
+  requireFactoryCapability(auth, 'person.manage', person.homeBaseId, person.factoryId)
   for (const item of qualifications) {
     requireRow(
       one<IdRow>('SELECT id FROM qualifications WHERE id = ?', [item.qualificationId]),
@@ -818,17 +1374,23 @@ export function replacePersonQualifications(
 
 export function listCrews(auth: AuthContext, query: PageQuery): PagedResult<Crew> {
   const visible = accessibleBaseIds(auth)
+  const visibleFactories = accessibleFactoryIds(auth)
   return pageResult(
-    all<Crew>(
-      `SELECT id, code, name, base_id AS baseId, work_area_id AS workAreaId,
-              leader_person_id AS leaderPersonId, status, revision,
+    all<CrewRow>(
+      `SELECT id, code, name, base_id AS baseId, work_area_id AS workAreaId, factory_id AS factoryId,
+              (SELECT cm.person_id FROM crew_memberships cm WHERE cm.crew_id = crews.id AND cm.role = 'leader'
+                 AND cm.valid_from <= date('now','localtime') AND (cm.valid_to IS NULL OR cm.valid_to >= date('now','localtime')) ORDER BY cm.valid_from, cm.id LIMIT 1) AS leaderPersonId, status, revision,
+              ${crewDerivedColumns},
+              ${crewLeaderNamesColumn},
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
          FROM crews ORDER BY name`,
-    ).filter((row) =>
+    ).map(mapCrewRow).filter((row) =>
       (visible === null || visible.has(row.baseId))
+      && (visibleFactories === null || Boolean(row.factoryId && visibleFactories.has(row.factoryId)))
       && (!query.siteId || row.baseId === query.siteId)
       && (!query.workAreaId || row.workAreaId === query.workAreaId)
+      && (!query.factoryId || row.factoryId === query.factoryId)
       && (!query.status || row.status === query.status)
       && (!query.q || contains(row.name, query.q) || contains(row.code, query.q)),
     ),
@@ -838,21 +1400,29 @@ export function listCrews(auth: AuthContext, query: PageQuery): PagedResult<Crew
 
 export function createCrew(
   auth: AuthContext,
-  input: Pick<Crew, 'code' | 'name' | 'baseId' | 'workAreaId' | 'leaderPersonId' | 'status'>,
+  input: Pick<Crew, 'code' | 'name' | 'baseId' | 'workAreaId' | 'factoryId'
+    | 'leaderPersonId' | 'status'>,
 ): Crew {
-  requireBaseCapability(auth, 'crew.manage', input.baseId)
-  if (getArea(input.workAreaId).baseId !== input.baseId) throw AppError.badRequest('班组工区必须属于同一基地')
-  if (input.leaderPersonId) getPerson(input.leaderPersonId)
+  requireFactoryCapability(auth, 'crew.manage', input.baseId, input.factoryId)
+  if (input.workAreaId && (getArea(input.workAreaId).baseId !== input.baseId || getArea(input.workAreaId).factoryId !== input.factoryId)) {
+    throw AppError.badRequest('班组工区必须属于同一工厂')
+  }
+  if (!input.factoryId) throw AppError.badRequest('生产班必须归属饲料厂')
+  if (input.factoryId) {
+    const factory = getFactory(input.factoryId)
+    if (factory.baseId !== input.baseId) throw AppError.badRequest('班组工厂必须属于同一基地')
+  }
+  if (input.leaderPersonId) throw AppError.badRequest('请先添加班组成员，再将成员岗位设为班组长')
   if (input.status) assertActiveStatus(input.status)
   const id = newId('crew')
   const ts = nowIso()
   run(
     `INSERT INTO crews
-      (id, code, name, base_id, work_area_id, leader_person_id, status, revision,
+      (id, code, name, base_id, work_area_id, factory_id, leader_person_id, status, revision,
        created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-    [id, input.code, input.name, input.baseId, input.workAreaId, input.leaderPersonId,
-      input.status, ts, auth.accountId, ts, auth.accountId],
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+    [id, input.code, input.name, input.baseId, input.workAreaId, input.factoryId,
+      input.leaderPersonId, input.status, ts, auth.accountId, ts, auth.accountId],
   )
   const created = getCrew(id)
   audit(auth, 'org.crew.create', 'crew', id, { type: 'base', id: input.baseId }, undefined, created)
@@ -862,20 +1432,32 @@ export function createCrew(
 export function updateCrew(
   auth: AuthContext,
   id: string,
-  input: Partial<Pick<Crew, 'code' | 'name' | 'workAreaId' | 'leaderPersonId' | 'status' | 'revision'>>,
+  input: Partial<Pick<Crew, 'code' | 'name' | 'workAreaId' | 'factoryId'
+    | 'leaderPersonId' | 'status' | 'revision'>>,
 ): Crew {
   const before = getCrew(id)
-  requireBaseCapability(auth, 'crew.manage', before.baseId)
+  requireFactoryCapability(auth, 'crew.manage', before.baseId, before.factoryId)
   assertRevision(before, input.revision, '班组')
-  const workAreaId = input.workAreaId ?? before.workAreaId
-  if (getArea(workAreaId).baseId !== before.baseId) throw AppError.badRequest('班组工区必须属于同一基地')
-  if (input.leaderPersonId) getPerson(input.leaderPersonId)
+  const workAreaId = input.workAreaId === undefined ? before.workAreaId : input.workAreaId
+  const factoryId = input.factoryId === undefined ? before.factoryId : input.factoryId
+  if (workAreaId && (getArea(workAreaId).baseId !== before.baseId || getArea(workAreaId).factoryId !== factoryId)) {
+    throw AppError.badRequest('班组工区必须属于同一工厂')
+  }
+  requireFactoryCapability(auth, 'crew.manage', before.baseId, factoryId)
+  if (!factoryId) throw AppError.badRequest('生产班必须归属饲料厂')
+  if (factoryId && getFactory(factoryId).baseId !== before.baseId) {
+    throw AppError.badRequest('班组工厂必须属于同一基地')
+  }
+  if (input.leaderPersonId !== undefined && input.leaderPersonId !== before.leaderPersonId) {
+    throw AppError.badRequest('请在成员关系中设置班组长岗位')
+  }
   if (input.status) assertActiveStatus(input.status)
   run(
-    `UPDATE crews SET code = ?, name = ?, work_area_id = ?, leader_person_id = ?, status = ?,
+    `UPDATE crews SET code = ?, name = ?, work_area_id = ?, factory_id = ?,
+       leader_person_id = ?, status = ?,
        revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = ? AND revision = ?`,
-    [input.code ?? before.code, input.name ?? before.name, workAreaId,
-      input.leaderPersonId === undefined ? before.leaderPersonId : input.leaderPersonId,
+    [input.code ?? before.code, input.name ?? before.name, workAreaId, factoryId,
+      before.leaderPersonId,
       input.status ?? before.status, nowIso(), auth.accountId, id, before.revision],
   )
   const updated = getCrew(id)
@@ -885,6 +1467,7 @@ export function updateCrew(
 
 export function archiveCrew(auth: AuthContext, id: string, revision: number): void {
   const before = getCrew(id)
+  requireFactoryCapability(auth, 'crew.manage', before.baseId, before.factoryId)
   const active = one<IdRow>(
     `SELECT id FROM crew_memberships
       WHERE crew_id = ? AND (valid_to IS NULL OR valid_to >= date('now')) LIMIT 1`,
@@ -898,19 +1481,21 @@ export function listCrewMembers(
   auth: AuthContext,
   crewId: string,
   asOf?: string,
+  includeAll = false,
 ): CrewMembership[] {
   const crew = getCrew(crewId)
-  requireBaseCapability(auth, 'crew.view', crew.baseId)
-  const date = asOf ?? new Date().toISOString().slice(0, 10)
-  return all<CrewMembership>(
-    `SELECT id, crew_id AS crewId, person_id AS personId, role,
-            valid_from AS validFrom, valid_to AS validTo, revision,
-            created_at AS createdAt, created_by AS createdBy,
-            updated_at AS updatedAt, updated_by AS updatedBy
-       FROM crew_memberships
-      WHERE crew_id = ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)
-      ORDER BY role, valid_from`,
-    [crewId, date, date],
+  requireFactoryCapability(auth, 'crew.view', crew.baseId, crew.factoryId)
+  const date = asOf ?? todayLocal()
+  return all<CrewMembership & { personName: string; employeeCode: string }>(
+    `SELECT m.id, m.crew_id AS crewId, m.person_id AS personId,
+            p.name AS personName, p.employee_code AS employeeCode, m.role,
+            m.valid_from AS validFrom, m.valid_to AS validTo, m.revision,
+            m.created_at AS createdAt, m.created_by AS createdBy,
+            m.updated_at AS updatedAt, m.updated_by AS updatedBy
+       FROM crew_memberships m JOIN people p ON p.id = m.person_id
+      WHERE m.crew_id = ? AND (? = 1 OR (m.valid_from <= ? AND (m.valid_to IS NULL OR m.valid_to >= ?)))
+      ORDER BY m.role, m.valid_from`,
+    [crewId, Number(includeAll), date, date],
   )
 }
 
@@ -919,35 +1504,45 @@ export function addCrewMember(
   crewId: string,
   input: Pick<CrewMembership, 'personId' | 'role' | 'validFrom' | 'validTo'>,
 ): CrewMembership {
+  return transaction(() => addCrewMemberInternal(auth, crewId, input))
+}
+
+function addCrewMemberInternal(
+  auth: AuthContext,
+  crewId: string,
+  input: Pick<CrewMembership, 'personId' | 'role' | 'validFrom' | 'validTo'>,
+): CrewMembership {
   const crew = getCrew(crewId)
-  requireBaseCapability(auth, 'crew.manage', crew.baseId)
-  getPerson(input.personId)
+  requireFactoryCapability(auth, 'crew.manage', crew.baseId, crew.factoryId)
+  const person = personRow(input.personId)
+  if (person.status !== 'active') throw AppError.badRequest('只能添加启用的人员')
   assertCrewRole(input.role)
   if (input.validTo && input.validTo < input.validFrom) throw AppError.badRequest('失效日期不能早于生效日期')
-  const overlap = one<IdRow>(
-    `SELECT id FROM crew_memberships
-      WHERE crew_id = ? AND person_id = ?
-        AND valid_from <= COALESCE(?, '9999-12-31')
-        AND (valid_to IS NULL OR valid_to >= ?) LIMIT 1`,
-    [crewId, input.personId, input.validTo, input.validFrom],
-  )
-  if (overlap) throw AppError.conflict('该人员在所选日期内已属于本班组')
+  if (!crew.factoryId) throw AppError.badRequest('班组须关联饲料厂')
+  if (person.factoryId !== crew.factoryId) {
+    const secondment = input.validTo && one<IdRow>(
+      `SELECT id FROM secondments WHERE person_id = ? AND to_base_id = ? AND to_factory_id = ?
+         AND status IN ('planned', 'active') AND start_date <= ? AND end_date >= ? LIMIT 1`,
+      [input.personId, crew.baseId, crew.factoryId, input.validFrom, input.validTo],
+    )
+    if (!secondment) throw AppError.badRequest('跨厂成员须有覆盖成员有效期的借调，且必须填写结束日期')
+  }
+  // A person belongs to exactly one crew per date, across every crew.
+  assertNoCrewOverlap(input.personId, null, input.validFrom, input.validTo ?? null, auth)
   const id = newId('cm')
   const ts = nowIso()
-  transaction(() => {
-    run(
+    runMembership(() => run(
       `INSERT INTO crew_memberships
         (id, crew_id, person_id, role, valid_from, valid_to, revision,
          created_at, created_by, updated_at, updated_by)
        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [id, crewId, input.personId, input.role, input.validFrom, input.validTo,
         ts, auth.accountId, ts, auth.accountId],
-    )
+    ))
     run(
       `UPDATE crews SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = ?`,
       [ts, auth.accountId, crewId],
     )
-  })
   const created = requireRow(
     one<CrewMembership>(
       `SELECT id, crew_id AS crewId, person_id AS personId, role,
@@ -961,6 +1556,82 @@ export function addCrewMember(
   )
   audit(auth, 'org.crew.member.create', 'crew_membership', id, { type: 'base', id: crew.baseId }, undefined, created)
   return created
+}
+
+export function addCrewMembers(auth: AuthContext, crewId: string, members: Array<Pick<CrewMembership, 'personId' | 'role' | 'validFrom' | 'validTo'>>): CrewMembership[] {
+  return transaction(() => members.map((member) => {
+    try { return addCrewMemberInternal(auth, crewId, member) }
+    catch (error) {
+      if (error instanceof AppError) {
+        const name = one<{ name: string }>('SELECT name FROM people WHERE id = ?', [member.personId])?.name || member.personId
+        throw new AppError(error.status, error.code, `${name}：${error.message}；整批未保存`, { personId: member.personId })
+      }
+      throw error
+    }
+  }))
+}
+
+export function updateCrewMember(auth: AuthContext, id: string, input: Pick<CrewMembership, 'role' | 'validFrom' | 'validTo' | 'revision'>): CrewMembership {
+  const before = requireRow(one<CrewMembership>(
+    `SELECT id, crew_id AS crewId, person_id AS personId, role, valid_from AS validFrom, valid_to AS validTo,
+      revision, created_at AS createdAt, created_by AS createdBy, updated_at AS updatedAt, updated_by AS updatedBy
+      FROM crew_memberships WHERE id = ?`, [id]), '班组成员')
+  const crew = getCrew(before.crewId)
+  requireFactoryCapability(auth, 'crew.manage', crew.baseId, crew.factoryId)
+  assertRevision(before, input.revision, '班组成员')
+  const person = personRow(before.personId)
+  if (person.status !== 'active') throw AppError.badRequest('只能设置启用的人员')
+  if (input.validTo && input.validTo < input.validFrom) throw AppError.badRequest('结束日期不能早于生效日期')
+  if (person.factoryId !== crew.factoryId && (!input.validTo || !one<IdRow>(
+    `SELECT id FROM secondments WHERE person_id = ? AND to_factory_id = ? AND to_base_id = ? AND status IN ('planned','active') AND start_date <= ? AND end_date >= ? LIMIT 1`,
+    [person.id, crew.factoryId, crew.baseId, input.validFrom, input.validTo],
+  ))) throw AppError.badRequest('跨厂成员须有覆盖成员有效期的借调，且必须填写结束日期')
+  // Cross-crew uniqueness: adjusting dates here must not collide with another crew.
+  assertNoCrewOverlap(person.id, id, input.validFrom, input.validTo ?? null, auth)
+  return transaction(() => {
+    runMembership(() => run(
+      `UPDATE crew_memberships SET role = ?, valid_from = ?, valid_to = ?, revision = revision + 1,
+        updated_at = ?, updated_by = ? WHERE id = ? AND revision = ?`,
+      [input.role, input.validFrom, input.validTo, nowIso(), auth.accountId, id, before.revision],
+    ))
+    run('UPDATE crews SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = ?', [nowIso(), auth.accountId, crew.id])
+    const updated = { ...before, ...input, revision: before.revision + 1 }
+    audit(auth, 'org.crew.member.update', 'crew_membership', id, { type: 'factory', id: crew.factoryId! }, before, updated)
+    return updated
+  })
+}
+
+export function listCrewScopes(auth: AuthContext, crewId: string): CrewScope[] {
+  const crew = getCrew(crewId)
+  requireFactoryCapability(auth, 'crew.view', crew.baseId, crew.factoryId)
+  return all<CrewScope>(`SELECT id, crew_id AS crewId, work_area_id AS workAreaId,
+    production_line_id AS productionLineId FROM crew_scopes WHERE crew_id = ? ORDER BY id`, [crewId])
+}
+
+export function replaceCrewScopes(auth: AuthContext, crewId: string, input: { workAreaIds: string[]; productionLineIds: string[]; revision: number }): CrewScope[] {
+  const crew = getCrew(crewId)
+  requireFactoryCapability(auth, 'crew.manage', crew.baseId, crew.factoryId)
+  assertRevision(crew, input.revision, '班组')
+  if (!crew.factoryId) throw AppError.badRequest('班组须先关联工厂')
+  for (const areaId of new Set(input.workAreaIds)) {
+    const area = getArea(areaId)
+    if (area.factoryId !== crew.factoryId || area.status !== 'active') throw AppError.badRequest('适用工区须属于班组工厂且处于启用状态')
+  }
+  for (const lineId of new Set(input.productionLineIds)) {
+    const line = getLine(lineId)
+    const area = getArea(line.workAreaId)
+    if (area.factoryId !== crew.factoryId || area.status !== 'active' || line.status !== 'active') throw AppError.badRequest('适用产线须属于班组工厂且处于启用状态')
+  }
+  return transaction(() => {
+    const before = listCrewScopes(auth, crewId)
+    run('DELETE FROM crew_scopes WHERE crew_id = ?', [crewId])
+    for (const areaId of new Set(input.workAreaIds)) run('INSERT INTO crew_scopes (id, crew_id, work_area_id, production_line_id) VALUES (?, ?, ?, NULL)', [newId('cscope'), crewId, areaId])
+    for (const lineId of new Set(input.productionLineIds)) run('INSERT INTO crew_scopes (id, crew_id, work_area_id, production_line_id) VALUES (?, ?, NULL, ?)', [newId('cscope'), crewId, lineId])
+    run('UPDATE crews SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = ?', [nowIso(), auth.accountId, crewId])
+    const after = listCrewScopes(auth, crewId)
+    audit(auth, 'org.crew.scopes.replace', 'crew', crewId, { type: 'factory', id: crew.factoryId! }, before, after)
+    return after
+  })
 }
 
 export function endCrewMember(
@@ -981,9 +1652,10 @@ export function endCrewMember(
     '班组成员',
   )
   const crew = getCrew(before.crewId)
-  requireBaseCapability(auth, 'crew.manage', crew.baseId)
+  requireFactoryCapability(auth, 'crew.manage', crew.baseId, crew.factoryId)
   assertRevision(before, revision, '班组成员')
   if (endDate < before.validFrom) throw AppError.badRequest('结束日期不能早于生效日期')
+  if (before.validTo && endDate > before.validTo) throw AppError.badRequest('结束日期不能延长原有效期')
   run(
     `UPDATE crew_memberships SET valid_to = ?, revision = revision + 1,
        updated_at = ?, updated_by = ? WHERE id = ? AND revision = ?`,
@@ -995,18 +1667,19 @@ export function endCrewMember(
 }
 
 export function listSecondments(auth: AuthContext, query: PageQuery): PagedResult<Secondment> {
-  const visible = accessibleBaseIds(auth)
   return pageResult(
     all<Secondment>(
       `SELECT id, person_id AS personId, from_company_id AS fromCompanyId,
               from_base_id AS fromBaseId, to_company_id AS toCompanyId,
-              to_base_id AS toBaseId, start_date AS startDate, end_date AS endDate,
+              to_base_id AS toBaseId, to_factory_id AS toFactoryId, start_date AS startDate, end_date AS endDate,
               purpose, status, approved_by AS approvedBy, revision,
               created_at AS createdAt, created_by AS createdBy,
               updated_at AS updatedAt, updated_by AS updatedBy
          FROM secondments ORDER BY start_date DESC`,
     ).filter((row) =>
-      (visible === null || visible.has(row.fromBaseId) || visible.has(row.toBaseId))
+      (withinScopedBase(auth, row.toBaseId) || withinScopedBase(auth, row.fromBaseId))
+      && (canAccessFactory(auth, 'secondment.view', row.toBaseId, row.toFactoryId)
+        || canAccessFactory(auth, 'secondment.view', row.fromBaseId, personRow(row.personId).factoryId))
       && (!query.status || row.status === query.status)
       && (!query.q || contains(row.purpose, query.q)),
     ),
@@ -1020,13 +1693,18 @@ export function createSecondment(
     approvedBy?: string | null
   },
 ): Secondment {
-  const person = getPerson(input.personId)
+  const person = personRow(input.personId)
   if (input.fromCompanyId !== person.homeCompanyId || input.fromBaseId !== person.homeBaseId) {
     throw AppError.badRequest('借调来源必须与人员当前归属一致')
   }
-  requireBaseCapability(auth, 'secondment.manage', input.toBaseId)
+  if (!input.toFactoryId) throw AppError.badRequest('必须明确接收工厂')
+  requireFactoryCapability(auth, 'secondment.manage', input.toBaseId, input.toFactoryId)
   if (getBase(input.toBaseId).companyId !== input.toCompanyId) {
     throw AppError.badRequest('接收公司与接收基地不一致')
+  }
+  const targetFactory = getFactory(input.toFactoryId)
+  if (targetFactory.baseId !== input.toBaseId || targetFactory.companyId !== input.toCompanyId || targetFactory.status !== 'active') {
+    throw AppError.badRequest('接收工厂须为接收公司和基地下的启用工厂')
   }
   if (input.endDate < input.startDate) throw AppError.badRequest('借调结束日期不能早于开始日期')
   assertSecondmentStatus(input.status)
@@ -1041,12 +1719,12 @@ export function createSecondment(
   const ts = nowIso()
   run(
     `INSERT INTO secondments
-      (id, person_id, from_company_id, from_base_id, to_company_id, to_base_id,
+      (id, person_id, from_company_id, from_base_id, to_company_id, to_base_id, to_factory_id,
        start_date, end_date, purpose, status, approved_by, revision,
        created_at, created_by, updated_at, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
     [id, input.personId, input.fromCompanyId, input.fromBaseId, input.toCompanyId,
-      input.toBaseId, input.startDate, input.endDate, input.purpose, input.status,
+      input.toBaseId, input.toFactoryId, input.startDate, input.endDate, input.purpose, input.status,
       input.approvedBy ?? null, ts, auth.accountId, ts, auth.accountId],
   )
   const created = getSecondment(id)
@@ -1057,20 +1735,34 @@ export function createSecondment(
 export function updateSecondment(
   auth: AuthContext,
   id: string,
-  input: Partial<Pick<Secondment, 'startDate' | 'endDate' | 'purpose' | 'status' | 'approvedBy' | 'revision'>>,
+  input: Partial<Pick<Secondment, 'toFactoryId' | 'startDate' | 'endDate' | 'purpose' | 'status' | 'approvedBy' | 'revision'>>,
 ): Secondment {
   const before = getSecondment(id)
-  requireBaseCapability(auth, 'secondment.manage', before.toBaseId)
+  requireFactoryCapability(auth, 'secondment.manage', before.toBaseId, before.toFactoryId)
+  const toFactoryId = input.toFactoryId === undefined ? before.toFactoryId : input.toFactoryId
+  if (toFactoryId) {
+    requireFactoryCapability(auth, 'secondment.manage', before.toBaseId, toFactoryId)
+    const factory = getFactory(toFactoryId)
+    if (factory.baseId !== before.toBaseId || factory.companyId !== before.toCompanyId || factory.status !== 'active') {
+      throw AppError.badRequest('接收工厂须为接收公司和基地下的启用工厂')
+    }
+  }
   assertRevision(before, input.revision, '借调记录')
   const startDate = input.startDate ?? before.startDate
   const endDate = input.endDate ?? before.endDate
   if (endDate < startDate) throw AppError.badRequest('借调结束日期不能早于开始日期')
   if (input.status) assertSecondmentStatus(input.status)
+  const status = input.status ?? before.status
+  if ((status === 'planned' || status === 'active') && one<IdRow>(
+    `SELECT id FROM secondments WHERE person_id = ? AND id <> ?
+       AND status IN ('planned', 'active') AND start_date <= ? AND end_date >= ? LIMIT 1`,
+    [before.personId, id, endDate, startDate],
+  )) throw AppError.conflict('该人员在所选日期内已有有效借调')
   run(
-    `UPDATE secondments SET start_date = ?, end_date = ?, purpose = ?, status = ?,
+    `UPDATE secondments SET to_factory_id = ?, start_date = ?, end_date = ?, purpose = ?, status = ?,
        approved_by = ?, revision = revision + 1, updated_at = ?, updated_by = ?
      WHERE id = ? AND revision = ?`,
-    [startDate, endDate, input.purpose ?? before.purpose, input.status ?? before.status,
+    [toFactoryId, startDate, endDate, input.purpose ?? before.purpose, input.status ?? before.status,
       input.approvedBy === undefined ? before.approvedBy : input.approvedBy,
       nowIso(), auth.accountId, id, before.revision],
   )
@@ -1089,14 +1781,49 @@ export function getOrgTree(auth: AuthContext): OrgReferenceData {
     pageSize: 200,
     sortOrder: 'asc',
   }
+  const factories = listFactories(auth, query).items
+  const groupIds = new Set(factories.map((factory) => factory.managementGroupId).filter(Boolean))
+  const isGroupScope = auth.grants.some((grant) => grant.type === 'group')
   return {
     companies: listCompaniesFor(auth, query).items,
     bases: listBases(auth, query).items,
+    factories,
+    managementGroups: all<OrgReferenceData['managementGroups'][number]>('SELECT id, code, name, status, revision FROM management_groups ORDER BY name')
+      .filter((group) => isGroupScope || groupIds.has(group.id)),
+    handoverShiftProfiles: listHandoverShiftProfiles(auth),
     workAreas: listWorkAreas(auth, query).items,
     productionLines: listLines(auth, query).items,
     crews: listCrews(auth, query).items,
     qualifications: listQualifications(auth, query).items,
+    shiftTemplates: listShiftTemplates(auth, query).items,
   }
+}
+
+function getManagementGroup(id: string): ManagementGroup {
+  return requireRow(one<ManagementGroup>('SELECT id, code, name, status, revision FROM management_groups WHERE id = ?', [id]), '管理分组')
+}
+
+export function createManagementGroup(auth: AuthContext, input: Pick<ManagementGroup, 'code' | 'name' | 'status'>): ManagementGroup {
+  requireGroupCapability(auth, 'org.manage')
+  const id = newId('mg')
+  const ts = nowIso()
+  run('INSERT INTO management_groups (id, code, name, status, revision, created_at, updated_at, created_by, updated_by) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)', [id, input.code, input.name, input.status, ts, ts, auth.accountId, auth.accountId])
+  const created = getManagementGroup(id)
+  audit(auth, 'org.management-group.create', 'management_group', id, { type: 'group', id: 'group' }, undefined, created)
+  return created
+}
+
+export function updateManagementGroup(auth: AuthContext, id: string, input: Partial<Pick<ManagementGroup, 'code' | 'name' | 'status' | 'revision'>>): ManagementGroup {
+  requireGroupCapability(auth, 'org.manage')
+  const before = getManagementGroup(id)
+  assertRevision(before, input.revision, '管理分组')
+  if (input.status === 'archived' && one<IdRow>("SELECT id FROM factories WHERE management_group_id = ? AND status <> 'archived' LIMIT 1", [id])) {
+    throw AppError.referenceConflict('管理分组仍有工厂，请先调整工厂归属')
+  }
+  run('UPDATE management_groups SET code = ?, name = ?, status = ?, revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = ? AND revision = ?', [input.code ?? before.code, input.name ?? before.name, input.status ?? before.status, nowIso(), auth.accountId, id, before.revision])
+  const updated = getManagementGroup(id)
+  audit(auth, 'org.management-group.update', 'management_group', id, { type: 'group', id: 'group' }, before, updated)
+  return updated
 }
 
 export interface AccessScopeOption {
@@ -1120,11 +1847,13 @@ export function listAccessOptions(auth: AuthContext): {
       `SELECT id, code, name, built_in AS builtIn FROM roles ORDER BY built_in DESC, name`,
     ),
     scopes: [
-      { label: '全集团', type: 'group', id: 'group' },
+      { label: '全饲料总部', type: 'group', id: 'group' },
       ...all<{ id: string; name: string }>('SELECT id, name FROM companies ORDER BY name')
         .map((row) => ({ label: `公司 · ${row.name}`, type: 'company' as const, id: row.id })),
       ...all<{ id: string; name: string }>('SELECT id, name FROM production_bases ORDER BY name')
         .map((row) => ({ label: `基地 · ${row.name}`, type: 'base' as const, id: row.id })),
+      ...all<{ id: string; name: string }>('SELECT id, name FROM factories WHERE status = ? ORDER BY sort_order, name', ['active'])
+        .map((row) => ({ label: `饲料厂 · ${row.name}`, type: 'factory' as const, id: row.id })),
       ...all<{ id: string; base_id: string; name: string }>('SELECT id, base_id, name FROM work_areas ORDER BY name')
         .map((row) => ({ label: `工区 · ${row.name}`, type: 'work_area' as const, id: row.id })),
     ],
@@ -1229,21 +1958,10 @@ function validateScope(scope: ScopeRef): void {
   if (scope.type === 'group') return
   if (scope.type === 'company') return void getCompany(scope.id)
   if (scope.type === 'base') return void getBase(scope.id)
+  if (scope.type === 'factory') return void getFactory(scope.id)
   void getArea(scope.id)
 }
 
 export function assertPermissionCoverage(auth: AuthContext, capability: Capability, scope: ScopeRef): void {
-  if (!auth.grants.some((grant) => {
-    if (grant.capability !== capability) return false
-    if (grant.type === 'group' || grant.id === scope.id && grant.type === scope.type) return true
-    if (grant.type === 'company') {
-      if (scope.type === 'base') return getBase(scope.id).companyId === grant.id
-      if (scope.type === 'work_area') return getBase(getArea(scope.id).baseId).companyId === grant.id
-    }
-    if (grant.type === 'base') {
-      if (scope.type === 'work_area') return getArea(scope.id).baseId === grant.id
-      if (scope.type === 'base') return scope.id === grant.id
-    }
-    return false
-  })) throw AppError.forbidden()
+  if (!hasGrant(auth, capability, scope)) throw AppError.forbidden()
 }
