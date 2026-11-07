@@ -6,7 +6,7 @@ import { AppError } from '../../core/errors'
 import { all, one, run, transaction, newId, nowIso, parseJson } from '../../db/database'
 import { SqliteRosterContext, SqliteTicketContext } from '../execution/adapters'
 import { writeAudit } from '../../core/audit'
-import { requireScopedBase, scopedBaseId, withinScopedBase } from '../../core/base-scope'
+import { requireScopedBase, scopedBaseId, withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 import { listTicketCatalog } from '../templates/repository'
 
 export interface CrewRow { id: string; name: string; base_id: string; factory_id: string; work_area_id: string | null }
@@ -45,6 +45,7 @@ export function context(auth: AuthContext): OperationsContext {
   const selectedBase = scopedBaseId(auth)
   const crews=all<CrewRow>(`SELECT id,name,base_id,factory_id,work_area_id FROM crews WHERE status='active' AND factory_id IS NOT NULL ORDER BY name`)
     .filter(c=>withinScopedBase(auth,c.base_id))
+    .filter(c=>withinScopedFactory(auth,c.factory_id))
     .filter(c=>canManage(auth,c)||isMember(auth,c.id))
   const manageable=new Set(crews.filter(c=>canManage(auth,c)).map(c=>c.id))
   const people=all<{id:string;name:string;employee_code:string,home_base_id:string}>(`SELECT id,name,employee_code,home_base_id FROM people WHERE status='active' ORDER BY employee_code`)
@@ -83,6 +84,7 @@ export function rosters(auth:AuthContext,query:OperationsQuery={}):OperationsRos
   }
   return all<RosterRow>(`SELECT r.*,s.name AS shift_name,c.name AS crew_name,c.base_id AS base_id FROM operations_rosters r JOIN shift_templates s ON s.id=r.shift_template_id JOIN crews c ON c.id=r.crew_id ORDER BY r.work_date,r.shift_template_id,r.crew_id`)
     .filter(r=>withinScopedBase(auth,r.base_id))
+    .filter(r=>withinScopedFactory(auth,crew(r.crew_id).factory_id))
     .filter(r=>(!query.dateFrom||r.work_date>=query.dateFrom)&&(!query.dateTo||r.work_date<=query.dateTo)&&(!query.crewId||r.crew_id===query.crewId))
     .filter(r=>managed?canManage(auth,crew(r.crew_id)):parseJson<RosterAssignment[]>(r.assignments_json,[]).some(a=>a.personId===auth.personId))
     .map(r=>rosterMap(r,auth,managed))

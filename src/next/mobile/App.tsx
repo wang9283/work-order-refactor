@@ -24,10 +24,10 @@ function MobileShell() {
     user,
     identities,
     activeIdentity,
-    bases,
-    activeBase,
+    orgs,
+    activeOrg,
     switchIdentity,
-    switchBase,
+    switchOrg,
     contextVersion,
     error: contextError,
     refresh: refreshAuth,
@@ -53,19 +53,19 @@ function MobileShell() {
       className="mobile-nav"
       right={<div className="mobile-context-controls">
         <label className="mobile-context-switch">
-          <span>基地</span>
+          <span>组织</span>
           <select
-            aria-label="切换生产基地"
-            value={activeBase?.id}
+            aria-label="切换作业组织"
+            value={activeOrg?.id}
             onChange={(event) => {
-              void switchBase(event.target.value).catch((reason) => {
+              void switchOrg(event.target.value).catch((reason) => {
                 Toast.show({ icon: 'fail', content: errorMessage(reason) })
               })
             }}
           >
-            {bases.map((base) => (
-              <option key={base.id} value={base.id}>
-                {base.name}
+            {orgs.map((org) => (
+              <option key={org.id} value={org.id}>
+                {org.path.join(' / ')}
               </option>
             ))}
           </select>
@@ -98,7 +98,7 @@ function MobileShell() {
       {tab === 'work' && <WorkPage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
       {tab === 'schedule' && <SchedulePage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
       {tab === 'workload' && <WorkloadPage context={context} date={date} onDateChange={setDate} version={version} onChange={changed} />}
-      {tab === 'me' && <div className="mobile-card-list"><Card><div className="mobile-profile"><span>{user?.displayName?.slice(0, 1)}</span><div><h2>{user?.displayName}</h2><p>{me?.employeeCode || '未关联员工编号'}</p></div></div><div className="mobile-detail-field"><span>生产基地</span><b>{activeBase?.name || '未选择'}</b></div><div className="mobile-detail-field"><span>演示身份</span><b>{activeIdentity?.label || '未分配'}</b></div><div className="mobile-detail-field"><span>所属班组</span><b>{context.crews.filter(crew => me?.crewIds.includes(crew.id)).map(crew => crew.name).join('、') || '未分配'}</b></div><div className="mobile-detail-field"><span>当前角色</span><b>{user?.assignments.map(assignment => assignment.role.name).join('、') || '未分配'}</b></div>{context.crews.some(crew => crew.canManage) && <div className="mobile-detail-field"><span>可管理班组</span><b>{context.crews.filter(crew => crew.canManage).map(crew => crew.name).join('、')}</b></div>}</Card><p className="mobile-profile-note">计件工作量以最新分配记录为准。页面预计单价仅供参考，实际工资由薪酬系统核算。</p></div>}
+      {tab === 'me' && <div className="mobile-card-list"><Card><div className="mobile-profile"><span>{user?.displayName?.slice(0, 1)}</span><div><h2>{user?.displayName}</h2><p>{me?.employeeCode || '未关联员工编号'}</p></div></div><div className="mobile-detail-field"><span>作业组织</span><b>{activeOrg?.path.join(' / ') || '未选择'}</b></div><div className="mobile-detail-field"><span>演示身份</span><b>{activeIdentity?.label || '未分配'}</b></div><div className="mobile-detail-field"><span>所属班组</span><b>{context.crews.filter(crew => me?.crewIds.includes(crew.id)).map(crew => crew.name).join('、') || '未分配'}</b></div><div className="mobile-detail-field"><span>当前角色</span><b>{user?.assignments.map(assignment => assignment.role.name).join('、') || '未分配'}</b></div>{context.crews.some(crew => crew.canManage) && <div className="mobile-detail-field"><span>可管理班组</span><b>{context.crews.filter(crew => crew.canManage).map(crew => crew.name).join('、')}</b></div>}</Card><p className="mobile-profile-note">计件工作量以最新分配记录为准。页面预计单价仅供参考，实际工资由薪酬系统核算。</p></div>}
     </>}
     <TabBar activeKey={tab} onChange={key => setTab(key as MobileTab)} className="mobile-tabbar">
       <TabBar.Item key="work" icon={<FileOutline />} title="作业" />

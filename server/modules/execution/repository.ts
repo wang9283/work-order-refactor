@@ -16,7 +16,7 @@ import type {
 import { toPageMeta } from '../../../packages/contracts/src'
 import { writeAudit } from '../../core/audit'
 import { AppError } from '../../core/errors'
-import { requireScopedBase, scopedBaseId, withinScopedBase } from '../../core/base-scope'
+import { requireScopedBase, requireScopedFactory, scopedBaseId, scopedFactoryId, withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 import { all, newId, nowIso, one, run, transaction } from '../../db/database'
 import { SqlitePriceContext, SqliteRosterContext, SqliteTicketContext } from './adapters'
 import { validateFrozenForm } from './form-validator'
@@ -189,7 +189,10 @@ function ticketRow(authOrId: TicketScopeAuth | string, id?: string): TicketRow {
     [ticketId],
   )
   if (!row) throw AppError.notFound('工单')
-  if (typeof authOrId !== 'string') requireScopedBase(authOrId, row.site_id)
+  if (typeof authOrId !== 'string') {
+    requireScopedBase(authOrId, row.site_id)
+    requireScopedFactory(authOrId, row.factory_id)
+  }
   return row
 }
 
@@ -275,6 +278,7 @@ export function listTickets(
   )
   const visible = allRows.filter((row) => {
     if (!withinScopedBase(auth, row.site_id)) return false
+    if (!withinScopedFactory(auth, row.factory_id)) return false
     if (!canAccessFactoryScope(auth.grants, 'ticket.view', row.site_id, row.factory_id)) return false
     if (auth.personId && !canAccessFactoryScope(auth.grants, 'ticket.assign', row.site_id, row.factory_id)) {
       return getAssignments(row.id).some((assignment) => assignment.personId === auth.personId)
@@ -403,6 +407,11 @@ export function createTicket(
   input: CreateTicketInput,
 ): Ticket {
   requireScopedBase(auth, input.siteId)
+  // Demo sessions always write into the selected work organization; a missing
+  // factory would otherwise create tickets invisible to every organization view.
+  const scopedFactory = scopedFactoryId(auth)
+  if (scopedFactory && !input.factoryId) input.factoryId = scopedFactory
+  requireScopedFactory(auth, input.factoryId)
   if (!canAccessSite(auth.grants, 'ticket.create', input.siteId)) throw AppError.forbidden()
   if (!one<IdRow>('SELECT id FROM production_bases WHERE id = ? AND site_confirmed = 1 AND status = ?', [input.siteId, 'active'])) {
     throw AppError.badRequest('实际作业基地尚未确认或未启用')

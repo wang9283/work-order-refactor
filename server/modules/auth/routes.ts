@@ -1,5 +1,10 @@
 import type { FastifyInstance } from 'fastify'
-import { demoBaseSwitchSchema, demoLoginSchema, loginSchema } from '../../../packages/contracts/src'
+import {
+  demoBaseSwitchSchema,
+  demoLoginSchema,
+  demoOrgSwitchSchema,
+  loginSchema,
+} from '../../../packages/contracts/src'
 import { one } from '../../db/database'
 import {
   bearerToken,
@@ -12,7 +17,7 @@ import {
 import { parseInput, success } from '../../core/http'
 import { AppError } from '../../core/errors'
 import { verifyPassword } from '../../core/password'
-import { demoAuthOptions, demoBaseSwitch, demoLogin, demoSession } from './demo'
+import { demoAuthOptions, demoBaseSwitch, demoLogin, demoOrgSwitch, demoSession } from './demo'
 
 interface AccountRow {
   id: string
@@ -38,6 +43,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/demo-base', async (request) => {
     const input = parseInput(demoBaseSwitchSchema, request.body)
     return success(request, demoBaseSwitch(requireAuth(request), input.baseId))
+  })
+
+  app.post('/demo-org', async (request) => {
+    const input = parseInput(demoOrgSwitchSchema, request.body)
+    return success(request, demoOrgSwitch(requireAuth(request), input.orgId))
   })
 
   app.post('/login', async (request) => {

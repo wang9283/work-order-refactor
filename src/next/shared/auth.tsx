@@ -4,6 +4,7 @@ import type {
   DemoBaseOption,
   DemoIdentityId,
   DemoIdentityOption,
+  DemoOrgOption,
   DemoSessionResult,
 } from '@contracts/index'
 import {
@@ -21,6 +22,8 @@ interface AuthValue {
   user: CurrentUser | null
   identities: DemoIdentityOption[]
   activeIdentity: DemoIdentityOption | null
+  orgs: DemoOrgOption[]
+  activeOrg: DemoOrgOption | null
   bases: DemoBaseOption[]
   activeBase: DemoBaseOption | null
   loading: boolean
@@ -28,6 +31,7 @@ interface AuthValue {
   error: string
   contextVersion: number
   switchIdentity: (identityId: DemoIdentityId) => Promise<void>
+  switchOrg: (orgId: string) => Promise<void>
   switchBase: (baseId: string) => Promise<void>
   refresh: () => Promise<void>
 }
@@ -36,6 +40,10 @@ const AuthContext = createContext<AuthValue | null>(null)
 const IDENTITY_KEYS: Record<ClientSurface, string> = {
   admin: 'feed.group-work-order.identity.v1.admin',
   mobile: 'feed.group-work-order.identity.v1.mobile',
+}
+const ORG_KEYS: Record<ClientSurface, string> = {
+  admin: 'feed.group-work-order.org.v1.admin',
+  mobile: 'feed.group-work-order.org.v1.mobile',
 }
 const BASE_KEYS: Record<ClientSurface, string> = {
   admin: 'feed.group-work-order.base.v1.admin',
@@ -46,6 +54,8 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
   const [user, setUser] = useState<CurrentUser | null>(null)
   const [identities, setIdentities] = useState<DemoIdentityOption[]>([])
   const [activeIdentity, setActiveIdentity] = useState<DemoIdentityOption | null>(null)
+  const [orgs, setOrgs] = useState<DemoOrgOption[]>([])
+  const [activeOrg, setActiveOrg] = useState<DemoOrgOption | null>(null)
   const [bases, setBases] = useState<DemoBaseOption[]>([])
   const [activeBase, setActiveBase] = useState<DemoBaseOption | null>(null)
   const [loading, setLoading] = useState(true)
@@ -53,8 +63,10 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
   const [error, setError] = useState('')
   const [contextVersion, setContextVersion] = useState(0)
   const identityKey = IDENTITY_KEYS[surface]
+  const orgKey = ORG_KEYS[surface]
   const baseKey = BASE_KEYS[surface]
   const activeIdentityRef = useRef<DemoIdentityId | null>(null)
+  const activeOrgRef = useRef<string | null>(null)
   const activeBaseRef = useRef<string | null>(null)
   const userRef = useRef<CurrentUser | null>(null)
   const mountedRef = useRef(true)
@@ -73,24 +85,28 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
   const applyScope = useCallback((result: DemoSessionResult, token?: string) => {
     if (token) setToken(token)
     activeIdentityRef.current = result.identity.id
+    activeOrgRef.current = result.activeOrg.id
     activeBaseRef.current = result.activeBase.id
     userRef.current = result.user
     localStorage.setItem(identityKey, result.identity.id)
+    localStorage.setItem(orgKey, result.activeOrg.id)
     localStorage.setItem(baseKey, result.activeBase.id)
     setIdentities((current) => {
       if (!current.length) return current
       return current.map((identity) => identity.id === result.identity.id ? result.identity : identity)
     })
     setActiveIdentity(result.identity)
+    setOrgs(result.orgs)
+    setActiveOrg(result.activeOrg)
     setBases(result.bases)
     setActiveBase(result.activeBase)
     setUser(result.user)
     setContextVersion((current) => current + 1)
-  }, [baseKey, identityKey])
+  }, [baseKey, identityKey, orgKey])
 
   const login = useCallback(async (
     requestedIdentity?: DemoIdentityId,
-    requestedBase?: string | null,
+    requestedOrg?: string | null,
   ): Promise<void> => {
     const operation = ++operationRef.current
     setSwitching(Boolean(userRef.current))
@@ -107,10 +123,10 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
         ) && identity.available)
         || options.identities.find((identity) => identity.available)
       if (!selected) throw new Error('当前演示数据中没有可用身份')
-      const preferredBase = requestedBase === undefined
-        ? activeBaseRef.current || localStorage.getItem(baseKey)
-        : requestedBase
-      const result = await api.auth.demoLogin(selected.id, preferredBase)
+      const preferredOrg = requestedOrg === undefined
+        ? activeOrgRef.current || localStorage.getItem(orgKey)
+        : requestedOrg
+      const result = await api.auth.demoLogin(selected.id, undefined, preferredOrg)
       if (!mountedRef.current || operation !== operationRef.current) return
       setIdentities(options.identities)
       applyScope(result, result.token)
@@ -124,7 +140,7 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
         setSwitching(false)
       }
     }
-  }, [applyScope, baseKey, identityKey, surface])
+  }, [applyScope, identityKey, orgKey, surface])
 
   const restore = useCallback(async (): Promise<void> => {
     const operation = ++operationRef.current
@@ -150,11 +166,11 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
         activeIdentityRef.current
           || (localStorage.getItem(identityKey) as DemoIdentityId | null)
           || undefined,
-        activeBaseRef.current || localStorage.getItem(baseKey),
+        activeOrgRef.current || localStorage.getItem(orgKey),
       )
       if (reason instanceof Error && !userRef.current) setError(errorMessage(reason))
     }
-  }, [applyScope, baseKey, identityKey, login])
+  }, [applyScope, identityKey, login, orgKey])
 
   useEffect(() => {
     mountedRef.current = true
@@ -172,7 +188,7 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
     setUnauthorizedHandler(() => {
       if (recoveringRef.current || !activeIdentityRef.current) return
       recoveringRef.current = true
-      void login(activeIdentityRef.current, activeBaseRef.current).finally(() => {
+      void login(activeIdentityRef.current, activeOrgRef.current).finally(() => {
         recoveringRef.current = false
       })
     })
@@ -186,8 +202,27 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
   const switchIdentity = useCallback(async (identityId: DemoIdentityId): Promise<void> => {
     if (identityId === activeIdentityRef.current && userRef.current) return
     if (!(await prepareSwitch())) return
-    await login(identityId, activeBaseRef.current)
+    await login(identityId, activeOrgRef.current)
   }, [login, prepareSwitch])
+
+  const switchOrg = useCallback(async (orgId: string): Promise<void> => {
+    if (orgId === activeOrgRef.current || switching) return
+    if (!(await prepareSwitch())) return
+    const operation = ++operationRef.current
+    setSwitching(true)
+    setError('')
+    try {
+      const result = await api.auth.demoOrg(orgId)
+      if (!mountedRef.current || operation !== operationRef.current) return
+      applyScope(result)
+    } catch (reason) {
+      if (!mountedRef.current || operation !== operationRef.current) return
+      setError(errorMessage(reason))
+      throw reason
+    } finally {
+      if (mountedRef.current && operation === operationRef.current) setSwitching(false)
+    }
+  }, [applyScope, prepareSwitch, switching])
 
   const switchBase = useCallback(async (baseId: string): Promise<void> => {
     if (baseId === activeBaseRef.current || switching) return
@@ -223,6 +258,8 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
       user,
       identities,
       activeIdentity,
+      orgs,
+      activeOrg,
       bases,
       activeBase,
       loading,
@@ -230,6 +267,7 @@ export function AuthProvider({ children, surface = 'admin' }: { children: ReactN
       error,
       contextVersion,
       switchIdentity,
+      switchOrg,
       switchBase,
       refresh,
     }}>

@@ -9,7 +9,7 @@ import { createTicket } from '../execution/repository'
 import { listBusinessWorkItems, setBusinessWorkItemAssignments } from '../business/service'
 import { canManage, crew, crewFor, requireManage } from './service'
 import { sanitationDetail } from './sanitation'
-import { requireScopedBase, withinScopedBase } from '../../core/base-scope'
+import { requireScopedBase, withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 
 export interface TicketRow {
   id:string; ticket_no:string; ticket_type_id:string; business_kind:'generic'|'production'|'loading';
@@ -26,6 +26,7 @@ export function ticketRow(auth:AuthContext,id:string):TicketRow {
 }
 export function managesTicket(auth:AuthContext,row:TicketRow):boolean {
   if(!withinScopedBase(auth,row.site_id))return false
+  if(!withinScopedFactory(auth,row.factory_id))return false
   return row.crew_id?canManage(auth,crew(row.crew_id)):hasGrant(auth,'ticket.assign',{type:'factory',id:row.factory_id})
 }
 export function participates(auth:AuthContext,id:string):boolean {
@@ -84,6 +85,7 @@ export function workloads(auth:AuthContext,query:OperationsQuery={}):WorkloadRes
   if(full&&query.crewId)requireManage(auth,crewFor(auth,query.crewId))
   const tickets=all<TicketRow>('SELECT * FROM tickets ORDER BY work_date DESC,created_at DESC')
     .filter(r=>withinScopedBase(auth,r.site_id))
+    .filter(r=>withinScopedFactory(auth,r.factory_id))
     .filter(r=>(!query.dateFrom||r.work_date>=query.dateFrom)&&(!query.dateTo||r.work_date<=query.dateTo)&&(!query.crewId||r.crew_id===query.crewId)&&(!query.ticketTypeId||r.ticket_type_id===query.ticketTypeId)&&(!query.status||r.status===query.status))
     .filter(r=>!query.plateNumber||one<{ticket_id:string}>('SELECT ticket_id FROM operations_sanitation WHERE ticket_id=? AND plate_number LIKE ?',[r.id,`%${query.plateNumber}%`]))
     .filter(r=>full?managesTicket(auth,r):participates(auth,r.id))

@@ -5,6 +5,7 @@ import type {
   CurrentUser,
   DemoAuthOptions,
   DemoBaseOption,
+  DemoOrgOption,
   DemoIdentityId,
   DemoLoginResult,
   DemoSessionResult,
@@ -134,10 +135,18 @@ export const api = {
     demoOptions: async (): Promise<DemoAuthOptions> => (
       await request<DemoAuthOptions>('/auth/demo-options')
     ).data,
-    demoLogin: async (identityId: DemoIdentityId, baseId?: string | null): Promise<DemoLoginResult> => (
+    demoLogin: async (
+      identityId: DemoIdentityId,
+      baseId?: string | null,
+      orgId?: string | null,
+    ): Promise<DemoLoginResult> => (
       await request<DemoLoginResult>('/auth/demo-login', {
         method: 'POST',
-        body: JSON.stringify({ identityId, ...(baseId ? { baseId } : {}) }),
+        body: JSON.stringify({
+          identityId,
+          ...(baseId ? { baseId } : {}),
+          ...(orgId ? { orgId } : {}),
+        }),
       })
     ).data,
     demoSession: async (): Promise<DemoSessionResult> => (
@@ -147,6 +156,12 @@ export const api = {
       await request<DemoSessionResult>('/auth/demo-base', {
         method: 'POST',
         body: JSON.stringify({ baseId }),
+      })
+    ).data,
+    demoOrg: async (orgId: DemoOrgOption['id']): Promise<DemoSessionResult> => (
+      await request<DemoSessionResult>('/auth/demo-org', {
+        method: 'POST',
+        body: JSON.stringify({ orgId }),
       })
     ).data,
     login: async (input: LoginInput): Promise<LoginResult> => {

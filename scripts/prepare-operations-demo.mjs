@@ -22,6 +22,42 @@ try {
   clone('production_bases','base_ops_demo',{id:'base_ops_demo_b',code:'OPS-DEMO-B',name:'工作量演示基地 B',company_id:'co_ops_demo',site_confirmed:1})
   clone('factories','factory_xinjin',{id:'factory_ops_demo',code:'OPS-DEMO',name:'工作量演示工厂',company_id:'co_ops_demo',base_id:'base_ops_demo',manager_person_id:null})
   clone('factories','factory_ops_demo',{id:'factory_ops_demo_b',code:'OPS-DEMO-B',name:'工作量演示工厂 B',company_id:'co_ops_demo',base_id:'base_ops_demo_b',manager_person_id:null})
+  // Org Management is the single source for the top-bar organization picker.
+  db.prepare(`INSERT OR IGNORE INTO org_nodes
+    (id,parent_id,code,name,factory_id,payroll_company_id,pricing_site_id,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    'org_ops_company', null, 'ORG-OPS-DEMO', '工作量演示公司', null, 'co_ops_demo', null, 'active', timestamp, timestamp)
+  db.prepare(`INSERT OR IGNORE INTO org_nodes
+    (id,parent_id,code,name,factory_id,payroll_company_id,pricing_site_id,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    'org_ops_demo', 'org_ops_company', 'ORG-OPS-DEMO-A', '工作量演示工厂', 'factory_ops_demo', 'co_ops_demo', 'base_ops_demo', 'active', timestamp, timestamp)
+  db.prepare(`INSERT OR IGNORE INTO org_nodes
+    (id,parent_id,code,name,factory_id,payroll_company_id,pricing_site_id,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+    'org_ops_demo_b', 'org_ops_company', 'ORG-OPS-DEMO-B', '工作量演示工厂 B', 'factory_ops_demo_b', 'co_ops_demo', 'base_ops_demo_b', 'active', timestamp, timestamp)
+  // Migration 011 derived org nodes from factories, but on freshly seeded databases the
+  // factories table is still empty when migrations run. Backfill one work org per active
+  // factory so Org Management stays the single source for every seeded base.
+  for (const group of db.prepare('SELECT * FROM management_groups').all()) {
+    db.prepare(`INSERT OR IGNORE INTO org_nodes
+      (id,parent_id,code,name,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?)`).run(
+      group.id, null, `ORG-${group.code}`, group.name, group.status, timestamp, timestamp)
+  }
+  const coveredFactories = new Set(
+    db.prepare('SELECT factory_id FROM org_nodes WHERE factory_id IS NOT NULL').all().map((row) => row.factory_id),
+  )
+  for (const factory of db.prepare("SELECT * FROM factories WHERE status = 'active'").all()) {
+    if (coveredFactories.has(factory.id)) continue
+    const parent = factory.management_group_id
+      ? db.prepare('SELECT id FROM org_nodes WHERE id = ?').get(factory.management_group_id)
+      : undefined
+    db.prepare(`INSERT OR IGNORE INTO org_nodes
+      (id,parent_id,code,name,factory_id,payroll_company_id,pricing_site_id,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      `org_seed_${factory.id}`, parent?.id ?? null, factory.code, factory.name, factory.id,
+      factory.company_id, factory.base_id, factory.status, timestamp, timestamp)
+  }
   clone('work_areas','area_xinjin_prod',{id:'area_ops_a',code:'OPS-AREA-A',name:'A 基地生产区',base_id:'base_ops_demo',factory_id:'factory_ops_demo',parent_id:null,manager_person_id:null})
   clone('work_areas','area_xinjin_prod',{id:'area_ops_b',code:'OPS-AREA-B',name:'B 基地生产区',base_id:'base_ops_demo_b',factory_id:'factory_ops_demo_b',parent_id:null,manager_person_id:null})
   clone('production_lines','line_xinjin_1',{id:'line_ops_a',code:'OPS-LINE-A',name:'A 基地一号线',base_id:'base_ops_demo',work_area_id:'area_ops_a'})

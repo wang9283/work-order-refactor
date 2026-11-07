@@ -22,6 +22,7 @@ export interface AuthContext {
   tokenHash: string
   demoIdentityId: DemoIdentityId | null
   selectedBaseId: string | null
+  selectedOrgNodeId: string | null
   grants: CapabilityGrant[]
 }
 
@@ -56,15 +57,19 @@ export function issueToken(): string {
 export function createSession(
   accountId: string,
   ttlHours = 24,
-  scope: { demoIdentityId?: DemoIdentityId | null; selectedBaseId?: string | null } = {},
+  scope: {
+    demoIdentityId?: DemoIdentityId | null
+    selectedBaseId?: string | null
+    selectedOrgNodeId?: string | null
+  } = {},
 ): { token: string; expiresAt: string } {
   const token = issueToken()
   const createdAt = new Date()
   const expiresAt = new Date(createdAt.getTime() + ttlHours * 60 * 60 * 1000)
   run(
     `INSERT INTO sessions
-      (token_hash, account_id, expires_at, created_at, last_seen_at, demo_identity_id, selected_base_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      (token_hash, account_id, expires_at, created_at, last_seen_at, demo_identity_id, selected_base_id, selected_org_node_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       hashToken(token),
       accountId,
@@ -73,6 +78,7 @@ export function createSession(
       createdAt.toISOString(),
       scope.demoIdentityId ?? null,
       scope.selectedBaseId ?? null,
+      scope.selectedOrgNodeId ?? null,
     ],
   )
   return { token, expiresAt: expiresAt.toISOString() }
@@ -94,9 +100,10 @@ export function resolveAuth(token: string): AuthContext | null {
     expires_at: string
     demo_identity_id: DemoIdentityId | null
     selected_base_id: string | null
+    selected_org_node_id: string | null
   }>(
     `SELECT a.id, a.username, a.display_name, a.person_id, a.status, s.expires_at,
-            s.demo_identity_id, s.selected_base_id
+            s.demo_identity_id, s.selected_base_id, s.selected_org_node_id
      FROM sessions s
      JOIN accounts a ON a.id = s.account_id
      WHERE s.token_hash = ?`,
@@ -138,12 +145,22 @@ export function resolveAuth(token: string): AuthContext | null {
     tokenHash,
     demoIdentityId: row.demo_identity_id,
     selectedBaseId: row.selected_base_id,
+    selectedOrgNodeId: row.selected_org_node_id,
     grants,
   }
 }
 
 export function setSessionSelectedBase(tokenHash: string, baseId: string): void {
   run('UPDATE sessions SET selected_base_id = ?, last_seen_at = ? WHERE token_hash = ?', [
+    baseId,
+    new Date().toISOString(),
+    tokenHash,
+  ])
+}
+
+export function setSessionSelectedOrg(tokenHash: string, orgNodeId: string, baseId: string): void {
+  run('UPDATE sessions SET selected_org_node_id = ?, selected_base_id = ?, last_seen_at = ? WHERE token_hash = ?', [
+    orgNodeId,
     baseId,
     new Date().toISOString(),
     tokenHash,

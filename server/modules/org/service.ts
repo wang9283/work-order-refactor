@@ -27,7 +27,7 @@ import type {
 } from '../../../packages/contracts/src'
 import { toPageMeta } from '../../../packages/contracts/src'
 import { writeAudit } from '../../core/audit'
-import { requireScopedBase, scopedBaseId, withinScopedBase } from '../../core/base-scope'
+import { requireScopedBase, scopedBaseId, withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 import { hasGrant, type AuthContext } from '../../core/auth'
 import { AppError } from '../../core/errors'
 import { newId, nowIso, one, run, transaction } from '../../db/database'
@@ -1199,6 +1199,7 @@ export function listPeople(auth: AuthContext, query: PageQuery): PagedResult<Per
   )
   const items = rows
     .filter((row) => personIds.has(row.id))
+    .filter((row) => withinScopedFactory(auth, row.factoryId))
     .map((row) => ({
       ...row,
       qualifications: qualifications.get(row.id) ?? [],
@@ -1388,6 +1389,7 @@ export function listCrews(auth: AuthContext, query: PageQuery): PagedResult<Crew
     ).map(mapCrewRow).filter((row) =>
       (visible === null || visible.has(row.baseId))
       && (visibleFactories === null || Boolean(row.factoryId && visibleFactories.has(row.factoryId)))
+      && withinScopedFactory(auth, row.factoryId)
       && (!query.siteId || row.baseId === query.siteId)
       && (!query.workAreaId || row.workAreaId === query.workAreaId)
       && (!query.factoryId || row.factoryId === query.factoryId)

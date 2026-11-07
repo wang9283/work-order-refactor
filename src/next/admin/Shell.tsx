@@ -8,10 +8,10 @@ import {
   MenuUnfoldOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
-import { Alert, App as AntApp, Avatar, Button, Layout, Menu, Select, Tag, Typography } from 'antd'
+import { Alert, App as AntApp, Avatar, Button, Layout, Menu, Select, Tag, TreeSelect, Typography } from 'antd'
 import { useAuth } from '@next/shared/auth'
 import { errorMessage, hasAnyCapability } from '@next/shared/api'
-import type { Capability, DemoIdentityId } from '@contracts/index'
+import type { Capability, DemoIdentityId, DemoOrgOption } from '@contracts/index'
 import AuditWorkspace from '@next/features/audit/AuditWorkspace'
 import OrgWorkspace from '@next/features/org/OrgWorkspace'
 import WorkAreasWorkspace from '@next/features/org/WorkAreasWorkspace'
@@ -106,15 +106,55 @@ const pageCapabilities: Record<PageKey, Capability[]> = {
   audit: ['audit.view'],
 }
 
+interface OrgTreeOption {
+  value: string
+  title: string
+  selectable: boolean
+  children?: OrgTreeOption[]
+}
+
+/** Parent organizations only expand and locate; concrete work organizations are selectable. */
+function orgTreeOptions(orgs: DemoOrgOption[]): OrgTreeOption[] {
+  const roots: OrgTreeOption[] = []
+  const index = new Map<string, OrgTreeOption>()
+  const ensure = (key: string, title: string, selectable: boolean, parentKey: string | null): OrgTreeOption => {
+    const existing = index.get(key)
+    if (existing) return existing
+    const node: OrgTreeOption = { value: key, title, selectable, children: [] }
+    index.set(key, node)
+    if (parentKey) {
+      const parent = index.get(parentKey)
+      if (parent) parent.children!.push(node)
+      else roots.push(node)
+    } else {
+      roots.push(node)
+    }
+    return node
+  }
+  for (const org of [...orgs].sort((a, b) => a.path.join('/').localeCompare(b.path.join('/'), 'zh-Hans-CN'))) {
+    let parent: OrgTreeOption | null = null
+    org.path.forEach((name, depth) => {
+      const isLeaf = depth === org.path.length - 1
+      const key = isLeaf ? org.id : `group:${org.path.slice(0, depth + 1).join('/')}`
+      parent = ensure(key, isLeaf ? `${name} · ${org.code}` : name, isLeaf, parent ? parent.value : null)
+    })
+  }
+  const prune = (options: OrgTreeOption[]): OrgTreeOption[] => options.map((option) => ({
+    ...option,
+    children: option.children?.length ? prune(option.children) : undefined,
+  }))
+  return prune(roots)
+}
+
 export default function Shell() {
   const {
     user,
     identities,
     activeIdentity,
-    bases,
-    activeBase,
+    orgs,
+    activeOrg,
     switchIdentity,
-    switchBase,
+    switchOrg,
     contextVersion,
     error,
   } = useAuth()
@@ -261,21 +301,18 @@ export default function Shell() {
           <div className="header-actions">
             <a href="/app.html" target="_blank" rel="noreferrer">员工 App</a>
             <div className="base-picker">
-              <span>生产基地</span>
-              <Select
-                value={activeBase?.id}
+              <span>作业组织</span>
+              <TreeSelect
+                value={activeOrg?.id}
                 onChange={(value) => {
-                  void switchBase(value).catch((reason) => {
+                  void switchOrg(value).catch((reason) => {
                     void message.error(errorMessage(reason))
                   })
                 }}
-                options={bases.map((base) => ({
-                  value: base.id,
-                  label: base.name,
-                  title: `${base.name} · ${base.code}`,
-                }))}
-                popupMatchSelectWidth={260}
-                aria-label="切换生产基地"
+                treeData={orgTreeOptions(orgs)}
+                treeDefaultExpandAll
+                popupMatchSelectWidth={300}
+                aria-label="切换作业组织"
               />
             </div>
             <Avatar className="user-avatar">{(user?.displayName || '用').slice(0, 1)}</Avatar>

@@ -5,6 +5,7 @@ import type {
   DemoIdentityId,
   DemoIdentityOption,
   DemoLoginResult,
+  DemoOrgOption,
   DemoSessionResult,
 } from '../../../packages/contracts/src'
 import {
@@ -13,11 +14,13 @@ import {
   deleteSession,
   resolveAuth,
   setSessionSelectedBase,
+  setSessionSelectedOrg,
   type AuthContext,
 } from '../../core/auth'
 import { AppError } from '../../core/errors'
 import { all, one } from '../../db/database'
-import { authorizedDemoBases, requireDemoBase, selectDemoBase } from './bases'
+import { authorizedDemoBases, requireDemoBase } from './bases'
+import { authorizedDemoOrgs, requireDemoOrg, selectDemoOrg } from './orgs'
 
 interface IdentityDefinition {
   id: DemoIdentityId
@@ -127,15 +130,27 @@ function definitionFor(identityId: DemoIdentityId): IdentityDefinition {
 }
 
 function scopeResult(auth: AuthContext, identity: DemoIdentityOption): DemoSessionResult {
+  const orgs = authorizedDemoOrgs(auth)
+  const activeOrg = orgs.find((org) => org.id === auth.selectedOrgNodeId) ?? orgs[0]
+  if (!activeOrg) throw AppError.forbidden('当前演示身份没有可用的授权作业组织')
+  if (auth.selectedOrgNodeId !== activeOrg.id) {
+    setSessionSelectedOrg(auth.tokenHash, activeOrg.id, activeOrg.baseId)
+  }
   const bases = authorizedDemoBases(auth)
-  const activeBase = bases.find((base) => base.id === auth.selectedBaseId) ?? bases[0]
+  const activeBase = bases.find((base) => base.id === activeOrg.baseId)
   if (!activeBase) throw AppError.forbidden('当前演示身份没有可用的授权生产基地')
   return {
     identity,
     user: currentUser(auth),
+    orgs,
+    activeOrg,
     bases,
     activeBase,
   }
+}
+
+function scopedAuthFor(auth: AuthContext, org: DemoOrgOption): AuthContext {
+  return { ...auth, selectedBaseId: org.baseId, selectedOrgNodeId: org.id }
 }
 
 export function demoAuthOptions(): DemoAuthOptions {
@@ -153,31 +168,46 @@ export function demoLogin(input: DemoLoginInput): DemoLoginResult {
   const session = createSession(identity.accountId, 24, { demoIdentityId: identity.id })
   const auth = resolveAuth(session.token)
   if (!auth) throw AppError.unauthorized()
-  const activeBase = selectDemoBase(auth, input.baseId)
-  if (!activeBase) {
+  const orgs = authorizedDemoOrgs(auth)
+  const requested = input.orgId
+    ? requireDemoOrg(auth, input.orgId)
+    : input.baseId
+      ? orgs.find((org) => org.baseId === input.baseId) ?? null
+      : null
+  const activeOrg = requested ?? selectDemoOrg(auth, null)
+  if (!activeOrg) {
     deleteSession(session.token)
-    throw AppError.forbidden('当前演示身份没有可用的授权生产基地')
+    throw AppError.forbidden('当前演示身份没有可用的授权作业组织')
   }
-  setSessionSelectedBase(auth.tokenHash, activeBase.id)
-  const scopedAuth = { ...auth, selectedBaseId: activeBase.id }
-  return { token: session.token, expiresAt: session.expiresAt, ...scopeResult(scopedAuth, identity) }
+  setSessionSelectedOrg(auth.tokenHash, activeOrg.id, activeOrg.baseId)
+  return {
+    token: session.token,
+    expiresAt: session.expiresAt,
+    ...scopeResult(scopedAuthFor(auth, activeOrg), identity),
+  }
 }
 
 export function demoSession(auth: AuthContext): DemoSessionResult {
   if (!enabled()) throw AppError.forbidden('免登录演示入口未开启')
   if (!auth.demoIdentityId) throw AppError.forbidden('当前会话不是演示身份')
   const identity = option(definitionFor(auth.demoIdentityId))
-  const bases = authorizedDemoBases(auth)
-  const activeBase = bases.find((base) => base.id === auth.selectedBaseId) ?? bases[0]
-  if (!activeBase) throw AppError.forbidden('当前演示身份没有可用的授权生产基地')
-  if (activeBase.id !== auth.selectedBaseId) setSessionSelectedBase(auth.tokenHash, activeBase.id)
-  return scopeResult({ ...auth, selectedBaseId: activeBase.id }, identity)
+  return scopeResult(auth, identity)
 }
 
 export function demoBaseSwitch(auth: AuthContext, baseId: string): DemoSessionResult {
   if (!enabled()) throw AppError.forbidden('免登录演示入口未开启')
   if (!auth.demoIdentityId) throw AppError.forbidden('当前会话不是演示身份')
   const target: DemoBaseOption = requireDemoBase(auth, baseId)
-  setSessionSelectedBase(auth.tokenHash, target.id)
-  return scopeResult({ ...auth, selectedBaseId: target.id }, option(definitionFor(auth.demoIdentityId)))
+  const org = authorizedDemoOrgs(auth).find((candidate) => candidate.baseId === target.id)
+  if (!org) throw AppError.forbidden('该基地下没有当前身份可用的作业组织')
+  setSessionSelectedOrg(auth.tokenHash, org.id, org.baseId)
+  return scopeResult(scopedAuthFor(auth, org), option(definitionFor(auth.demoIdentityId)))
+}
+
+export function demoOrgSwitch(auth: AuthContext, orgId: string): DemoSessionResult {
+  if (!enabled()) throw AppError.forbidden('免登录演示入口未开启')
+  if (!auth.demoIdentityId) throw AppError.forbidden('当前会话不是演示身份')
+  const target = requireDemoOrg(auth, orgId)
+  setSessionSelectedOrg(auth.tokenHash, target.id, target.baseId)
+  return scopeResult(scopedAuthFor(auth, target), option(definitionFor(auth.demoIdentityId)))
 }

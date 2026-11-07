@@ -8,7 +8,7 @@ import { setBusinessWorkItemAssignments } from '../business/service'
 import { crewFor, requireManage, context } from './service'
 import { ticketRow, mapTicket, managesTicket, participates, completed, workloads } from './workloads'
 import { hasQualification } from './dispatch'
-import { withinScopedBase } from '../../core/base-scope'
+import { withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 
 export function adjustAssignments(auth:AuthContext,id:string,itemId:string,input:AdjustAssignmentsInput):OperationsTicket {
   return transaction(()=>{
@@ -64,9 +64,9 @@ export function confirm(auth:AuthContext,ticketIds:string[]):{confirmed:number} 
     return {confirmed:new Set(ticketIds).size}
   })
 }
-interface FeedbackRow { id:string;ticket_id:string;person_id:string;message:string;status:'open'|'resolved';response:string;created_at:string;resolved_at:string|null;revision:number;ticket_no:string;person_name:string;crew_id:string|null;work_date:string;site_id:string }
+interface FeedbackRow { id:string;ticket_id:string;person_id:string;message:string;status:'open'|'resolved';response:string;created_at:string;resolved_at:string|null;revision:number;ticket_no:string;person_name:string;crew_id:string|null;work_date:string;site_id:string;factory_id:string }
 function feedbackRows():FeedbackRow[] {
-  return all(`SELECT f.*,t.ticket_no,t.crew_id,t.work_date,t.site_id,p.name AS person_name FROM operations_feedback f JOIN tickets t ON t.id=f.ticket_id JOIN people p ON p.id=f.person_id ORDER BY f.created_at DESC,f.id`)
+  return all(`SELECT f.*,t.ticket_no,t.crew_id,t.work_date,t.site_id,t.factory_id,p.name AS person_name FROM operations_feedback f JOIN tickets t ON t.id=f.ticket_id JOIN people p ON p.id=f.person_id ORDER BY f.created_at DESC,f.id`)
 }
 function mapFeedback(row:FeedbackRow):OperationsFeedback {
   return {id:row.id,ticketId:row.ticket_id,ticketNo:row.ticket_no,personId:row.person_id,personName:row.person_name,crewId:row.crew_id,message:row.message,status:row.status,response:row.response,createdAt:row.created_at,resolvedAt:row.resolved_at,revision:row.revision}
@@ -74,6 +74,7 @@ function mapFeedback(row:FeedbackRow):OperationsFeedback {
 export function feedback(auth:AuthContext,query:OperationsQuery={}):OperationsFeedback[] {
   if(query.crewId)requireManage(auth,crewFor(auth,query.crewId))
   return feedbackRows().filter(f=>withinScopedBase(auth,f.site_id)).filter(f=>(!query.dateFrom||f.work_date>=query.dateFrom)&&(!query.dateTo||f.work_date<=query.dateTo)&&(!query.crewId||f.crew_id===query.crewId))
+    .filter(f=>withinScopedFactory(auth,f.factory_id))
     .filter(f=>query.scope==='managed'?managesTicket(auth,ticketRow(auth,f.ticket_id)):f.person_id===auth.personId).map(mapFeedback)
 }
 export function createFeedback(auth:AuthContext,ticketId:string,message:string):OperationsFeedback {

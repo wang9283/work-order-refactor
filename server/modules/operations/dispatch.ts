@@ -4,7 +4,7 @@ import { AppError } from '../../core/errors'
 import { all, one, run, transaction, nowIso, newId, parseJson } from '../../db/database'
 import { SqliteRosterContext } from '../execution/adapters'
 import { crewFor, requireManage, isMember, canManage, type CrewRow } from './service'
-import { requireScopedBase, withinScopedBase } from '../../core/base-scope'
+import { requireScopedBase, withinScopedBase, withinScopedFactory } from '../../core/base-scope'
 
 interface RuleRow { site_id:string;ticket_type_id:string;ticket_type_name:string;crew_id:string;crew_name:string;revision:number }
 export function assignmentRules(auth:AuthContext):AssignmentRule[] {
@@ -79,6 +79,7 @@ export function sanitationSummary(auth:AuthContext,query:OperationsQuery={}):San
      FROM operations_sanitation s JOIN tickets t ON t.id=s.ticket_id
      WHERE t.status<>'cancelled' ORDER BY t.work_date,t.ticket_no`)
     .filter(row=>withinScopedBase(auth,row.site_id))
+    .filter(row=>withinScopedFactory(auth,row.factory_id))
     .filter(row=>(!query.dateFrom||row.work_date>=query.dateFrom)&&(!query.dateTo||row.work_date<=query.dateTo)&&(!query.crewId||row.crew_id===query.crewId))
     .filter(row=>{
       if(!managed)return one('SELECT id FROM ticket_assignments WHERE ticket_id=? AND person_id=?',[row.ticket_id,auth.personId])!==undefined

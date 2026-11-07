@@ -18,7 +18,7 @@ export function hasUnsavedChanges(): boolean {
 export function confirmDiscardUnsavedChanges(): boolean {
   if (!hasUnsavedChanges()) return true
   const labels = [...new Set(registrations.values())].join('、')
-  return window.confirm(`“${labels}”还有未保存的修改。切换身份或生产基地会放弃这些修改，是否继续？`)
+  return window.confirm(`“${labels}”还有未保存的修改。切换身份、作业组织或生产基地会放弃这些修改，是否继续？`)
 }
 
 function stableValue(value: unknown): string {

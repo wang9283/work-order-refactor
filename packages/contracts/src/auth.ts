@@ -116,15 +116,30 @@ export interface DemoBaseOption {
   companyId: Id
 }
 
+/** A selectable work organization from the org tree maintained in Org Management. */
+export interface DemoOrgOption {
+  id: Id
+  code: string
+  name: string
+  parentId: Id | null
+  factoryId: Id
+  baseId: Id
+  baseName: string
+  path: string[]
+}
+
 export const demoLoginSchema = z.object({
   identityId: z.enum(demoIdentityIds),
   baseId: z.string().trim().min(1).optional(),
+  orgId: z.string().trim().min(1).optional(),
 })
 
 export type DemoLoginInput = z.infer<typeof demoLoginSchema>
 
 export interface DemoLoginResult extends LoginResult {
   identity: DemoIdentityOption
+  orgs: DemoOrgOption[]
+  activeOrg: DemoOrgOption
   bases: DemoBaseOption[]
   activeBase: DemoBaseOption
 }
@@ -132,6 +147,8 @@ export interface DemoLoginResult extends LoginResult {
 export interface DemoSessionResult {
   identity: DemoIdentityOption
   user: CurrentUser
+  orgs: DemoOrgOption[]
+  activeOrg: DemoOrgOption
   bases: DemoBaseOption[]
   activeBase: DemoBaseOption
 }
@@ -141,6 +158,12 @@ export const demoBaseSwitchSchema = z.object({
 })
 
 export type DemoBaseSwitchInput = z.infer<typeof demoBaseSwitchSchema>
+
+export const demoOrgSwitchSchema = z.object({
+  orgId: z.string().trim().min(1),
+})
+
+export type DemoOrgSwitchInput = z.infer<typeof demoOrgSwitchSchema>
 
 export interface PermissionCheck {
   capability: Capability
